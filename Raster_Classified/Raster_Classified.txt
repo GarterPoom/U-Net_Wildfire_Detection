@@ -1,0 +1,1 @@
+This Directory Store Raster GeoTIFF after perform image processing for use Classified.

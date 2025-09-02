@@ -1,0 +1,1 @@
+This Directory keep GeoTIFF files cmall size that moved from Raster Output folder after finish extraction.
