@@ -182,7 +182,7 @@ def get_raster_files(image_base_dir):
 # Function to compute accuracy
 def compute_accuracy(outputs, masks):
     # Compute pixel-wise accuracy for segmentation
-    preds = torch.sigmoid(outputs) > 0.5  # Apply sigmoid and threshold to get predictions
+    preds = torch.sigmoid(outputs) >= 0.6  # Apply sigmoid and threshold to get predictions
     correct = (preds == masks).float().sum()  # Count correct predictions
     total = masks.numel()  # Total number of pixels
     return correct / total  # Return accuracy
@@ -218,7 +218,10 @@ def plot_metrics(train_losses, val_losses, train_accuracies, val_accuracies):
     
     # Save plot
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # Generate timestamp
-    fname = f"loss_accuracy_plot_{ts}.png"  # Create filename with timestamp
+    loss_acc_fname = f"loss_accuracy_plot_{ts}.png"  # Create filename with timestamp
+    save_dir = r'Model_Evaluation'  # Define save directory
+    os.makedirs(save_dir, exist_ok=True)  # Create directory if it doesn't exist
+    fname = os.path.join(save_dir, loss_acc_fname)  # Full file path
     plt.savefig(fname, dpi=300, bbox_inches="tight")  # Save plot as PNG
     print(f"Saved loss and accuracy plot → {fname}")  # Print save confirmation
     plt.show()  # Display plot
@@ -388,7 +391,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=1e-4)  # Initialize Adam optimizer with learning rate
 
     # Training Loop with Accuracy
-    num_epochs = 50  # Define number of training epochs
+    num_epochs = 100  # Define number of training epochs
     train_losses, val_losses = [], []  # Initialize lists for losses
     train_accuracies, val_accuracies = [], []  # Initialize lists for accuracies
 
