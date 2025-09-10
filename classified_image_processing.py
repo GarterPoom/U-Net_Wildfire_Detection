@@ -147,11 +147,8 @@ def process_bands(input_folder, output_folder, scl_output_folder=None):
         if not input_folder.exists(): # Check if input folder exists
             raise ValueError(f"Input folder does not exist: {input_folder}") # Raise error if not
         
-        output_folder = Path(output_folder) # Convert to Path object
-        if not output_folder.exists(): # Check if output folder exists
-            raise ValueError(f"Output folder does not exist: {output_folder}") # Raise error if not
-        
-        output_folder.mkdir(parents=True, exist_ok=True) # Ensure output folder exists
+        output_folder = Path(output_folder)
+        output_folder.mkdir(parents=True, exist_ok=True)  # Ensure output folder exists
 
         # Handle SCL output folder
         if scl_output_folder: # If SCL output folder is provided
