@@ -204,7 +204,7 @@ def generate_output_path(input_path, input_base_dir, output_dir, suffix="_predic
 # --------------------- Prediction Function ---------------------
 
 def predict_on_new_image(
-    model_path, new_image_path, output_path,
+    model_path, new_image_path, output_path, prob_output_path,
     tile_size=256, overlap=32, device=None, visualize=False
 ):
     """
@@ -300,13 +300,29 @@ def predict_on_new_image(
                 # Increment the count for each pixel in this tile's location.
                 pred_count[i:row_end, j:col_end] += 1
 
-    # --- Finalize and Save Mask ---
+    # --- Finalize Predictions ---
     # Average the predictions by dividing the sum by the count. `np.maximum` prevents division by zero.
     avg_pred = pred_sum / np.maximum(pred_count, 1)
-    # Create the final binary mask by applying a threshold of 0.5. Pixels with probability >= 0.5 are classified as "burned" (1).
-    full_mask = (avg_pred >= 0.5).astype(np.uint8)
+    
+    # --- Save Probability Map (without threshold) ---
+    # Update metadata for probability map: single band, float32, no nodata value, LZW compression
+    prob_meta = meta.copy()
+    prob_meta.update(count=1, dtype="float32", nodata=None, compress="lzw")
+    
+    # Create probability output directory if it doesn't exist
+    os.makedirs(os.path.dirname(prob_output_path), exist_ok=True)
+    
+    # Save the probability map
+    with rasterio.open(prob_output_path, "w", **prob_meta) as dst:
+        dst.write(avg_pred.astype(np.float32), 1)
+    
+    print(f"✅ Probability map saved to {prob_output_path}")
 
-    # --- Save the Output GeoTIFF ---
+    # --- Create Binary Mask and Save ---
+    # Create the final binary mask by applying a threshold of 0.5. Pixels with probability > 0.5 are classified as "burned" (1).
+    full_mask = (avg_pred > 0.5).astype(np.uint8)
+
+    # --- Save the Binary Mask GeoTIFF ---
     # Update the metadata for the output file: single band, 8-bit integer, a 'no data' value, and LZW compression.
     meta.update(count=1, dtype="uint8", nodata=255, compress="lzw")
     # Open a new GeoTIFF file in write mode with the updated metadata.
@@ -314,16 +330,27 @@ def predict_on_new_image(
         # Write the final mask to the first band of the new file.
         dst.write(full_mask, 1)
 
-    print(f"✅ Prediction complete. Output saved to {output_path}")
+    print(f"✅ Binary mask saved to {output_path}")
     print("To view in QGIS: Style → Singleband pseudocolor → 0=Unburned, 1=Burned")
 
     # --- Visualize (Optional) ---
     # If the visualize flag is set, display the predicted mask using matplotlib.
     if visualize:
-        plt.figure(figsize=(10, 10))
-        plt.imshow(full_mask, cmap="gray", vmin=0, vmax=1)
-        plt.title(f"Predicted Burn Mask for {os.path.basename(new_image_path)}")
-        plt.colorbar(ticks=[0, 1])
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
+        
+        # Plot probability map
+        im1 = ax1.imshow(avg_pred, cmap="viridis", vmin=0, vmax=1)
+        ax1.set_title(f"Probability Map for {os.path.basename(new_image_path)}")
+        ax1.axis('off')
+        plt.colorbar(im1, ax=ax1, fraction=0.046, pad=0.04)
+        
+        # Plot binary mask
+        im2 = ax2.imshow(full_mask, cmap="gray", vmin=0, vmax=1)
+        ax2.set_title(f"Binary Mask (threshold=0.5)")
+        ax2.axis('off')
+        plt.colorbar(im2, ax=ax2, ticks=[0, 1], fraction=0.046, pad=0.04)
+        
+        plt.tight_layout()
         plt.show()
 
 
@@ -337,7 +364,8 @@ def main():
     # Define all the command-line arguments the script can accept.
     parser.add_argument('--model_path', default="Export_Model/unet_wildfire_no_shape_file.pth", help="Path to trained model")
     parser.add_argument('--image_path', default="Raster_Classified", help="Path to input GeoTIFF or directory of GeoTIFFs")
-    parser.add_argument('--output_dir', default="Predicted_Mask", help="Directory to save output GeoTIFFs")
+    parser.add_argument('--output_dir', default="Predicted_Mask", help="Directory to save output binary masks")
+    parser.add_argument('--prob_output_dir', default="Predicted_Probability", help="Directory to save output probability maps")
     parser.add_argument('--tile_size', type=int, default=256, help="Tile size for processing")
     parser.add_argument('--overlap', type=int, default=32, help="Overlap between tiles")
     parser.add_argument('--visualize', action='store_true', help="Visualize the predicted mask")
@@ -350,6 +378,7 @@ def main():
     # Normalize file paths to handle different OS path separators (e.g., / vs \).
     args.image_path = os.path.normpath(args.image_path)
     args.output_dir = os.path.normpath(args.output_dir)
+    args.prob_output_dir = os.path.normpath(args.prob_output_dir)
     args.model_path = os.path.normpath(args.model_path)
 
     # --- Find Input Files ---
@@ -374,10 +403,15 @@ def main():
     # Loop through every TIFF file that was found.
     for tiff_file in tiff_files:
         # Generate the full path for the output mask file.
-        output_path = generate_output_path(tiff_file, base_dir, args.output_dir, preserve_structure=args.preserve_structure)
+        output_path = generate_output_path(tiff_file, base_dir, args.output_dir, 
+                                         suffix="_predicted_mask", preserve_structure=args.preserve_structure)
+        # Generate the full path for the probability map file.
+        prob_output_path = generate_output_path(tiff_file, base_dir, args.prob_output_dir, 
+                                              suffix="_probability", preserve_structure=args.preserve_structure)
+        
         print(f"Processing {tiff_file}...")
         # Call the main prediction function for the current file.
-        predict_on_new_image(args.model_path, tiff_file, output_path,
+        predict_on_new_image(args.model_path, tiff_file, output_path, prob_output_path,
                              tile_size=args.tile_size,
                              overlap=args.overlap,
                              visualize=args.visualize)
