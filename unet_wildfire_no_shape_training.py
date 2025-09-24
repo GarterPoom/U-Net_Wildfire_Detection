@@ -32,7 +32,6 @@ import seaborn as sns  # Importing seaborn for statistical data visualization
 import matplotlib.pyplot as plt  # Importing matplotlib for plotting
 
 # Evaluation metrics
-from sklearn.metrics import classification_report, confusion_matrix  # Importing metrics for model evaluation
 from sklearn.model_selection import train_test_split  # Importing train_test_split for data splitting
 
 
@@ -187,6 +186,82 @@ def compute_accuracy(outputs, masks):
     total = masks.numel()  # Total number of pixels
     return correct / total  # Return accuracy
 
+# ------------------ Segmentation Metrics ------------------
+def compute_iou(pred, target, threshold=0.5):
+    """Compute Intersection over Union (IoU) for binary segmentation"""
+    pred = (pred > threshold).float()
+    target = target.float()
+    
+    intersection = (pred * target).sum()
+    union = pred.sum() + target.sum() - intersection
+    
+    if union == 0:
+        return 1.0  # Perfect IoU when both pred and target are empty
+    return (intersection / union).item()
+
+def compute_dice_coefficient(pred, target, threshold=0.5):
+    """Compute Dice Coefficient for binary segmentation"""
+    pred = (pred > threshold).float()
+    target = target.float()
+    
+    intersection = (pred * target).sum()
+    dice = (2.0 * intersection) / (pred.sum() + target.sum() + 1e-8)
+    return dice.item()
+
+def compute_pixel_accuracy(pred, target, threshold=0.5):
+    """Compute Pixel Accuracy for binary segmentation"""
+    pred = (pred > threshold).float()
+    target = target.float()
+    
+    correct = (pred == target).float().sum()
+    total = target.numel()
+    return (correct / total).item()
+
+def compute_mae(pred, target):
+    """Compute Mean Absolute Error (MAE) for segmentation"""
+    pred = torch.sigmoid(pred)  # Apply sigmoid to get probabilities
+    target = target.float()
+    
+    mae = torch.abs(pred - target).mean()
+    return mae.item()
+
+def compute_segmentation_metrics(model, dataloader, device, threshold=0.5):
+    """Compute comprehensive segmentation metrics"""
+    model.eval()
+    ious, dices, pixel_accs, maes = [], [], [], []
+    
+    with torch.no_grad():
+        for images, masks in tqdm(dataloader, desc="Computing segmentation metrics"):
+            images = images.to(device)
+            masks = masks.to(device)
+            outputs = model(images)
+            
+            # Compute metrics for each sample in the batch
+            for i in range(outputs.shape[0]):
+                pred = outputs[i].squeeze()
+                target = masks[i].squeeze()
+                
+                iou = compute_iou(pred, target, threshold)
+                dice = compute_dice_coefficient(pred, target, threshold)
+                pixel_acc = compute_pixel_accuracy(pred, target, threshold)
+                mae = compute_mae(pred, target)
+                
+                ious.append(iou)
+                dices.append(dice)
+                pixel_accs.append(pixel_acc)
+                maes.append(mae)
+    
+    return {
+        'IoU': np.mean(ious),
+        'Dice': np.mean(dices),
+        'Pixel_Accuracy': np.mean(pixel_accs),
+        'MAE': np.mean(maes),
+        'IoU_std': np.std(ious),
+        'Dice_std': np.std(dices),
+        'Pixel_Accuracy_std': np.std(pixel_accs),
+        'MAE_std': np.std(maes)
+    }
+
 # Function to plot loss and accuracy
 def plot_metrics(train_losses, val_losses, train_accuracies, val_accuracies):
     # Plot training and validation loss and accuracy
@@ -226,80 +301,64 @@ def plot_metrics(train_losses, val_losses, train_accuracies, val_accuracies):
     print(f"Saved loss and accuracy plot → {fname}")  # Print save confirmation
     plt.show()  # Display plot
 
-# Function to get predictions and labels from a trained model
-def get_preds_labels(model, dataloader, device, mode="pixels"):
-    # Collect predictions and labels from model on dataloader
-    model.eval()  # Set model to evaluation mode
-    all_preds, all_labels = [], []  # Initialize lists for predictions and labels
 
-    with torch.no_grad():  # Disable gradient computation
-        for images, masks in tqdm(dataloader, desc="Collecting predictions"):  # Iterate over dataloader
-            images = images.to(device)  # Move images to device
-            masks = masks.to(device).float()  # Move masks to device and convert to float
-            outputs = model(images)  # Get model outputs
-            preds = torch.sigmoid(outputs) > 0.5  # Apply sigmoid and threshold
-
-            if mode == "pixels":  # Pixel-wise evaluation
-                all_preds.extend(preds.cpu().numpy().flatten())  # Flatten and store predictions
-                all_labels.extend(masks.cpu().numpy().flatten())  # Flatten and store labels
-            elif mode == "tiles":  # Tile-wise evaluation
-                for p, m in zip(preds, masks):  # Iterate over batch
-                    tile_pred = (p.cpu().numpy().mean() > 0.1).astype(int)  # Compute tile prediction
-                    tile_label = (m.cpu().numpy().mean() > 0.1).astype(int)  # Compute tile label
-                    all_preds.append(tile_pred)  # Store tile prediction
-                    all_labels.append(tile_label)  # Store tile label
+# Function to compute and save segmentation metrics
+def compute_and_save_segmentation_metrics(model, dataloader, device, mode="validation", threshold=0.5):
+    """Compute and save segmentation metrics (IoU, Dice, Pixel Accuracy, MAE)"""
+    print(f"\nComputing segmentation metrics for {mode} set...")
     
-    return np.array(all_preds), np.array(all_labels)  # Return predictions and labels as NumPy arrays
-
-# Function to compute classification report + confusion matrix
-def compute_report_and_cm(all_labels, all_preds, sample_pixels=False, mode="pixels"):
-    # Compute and visualize classification report and confusion matrix
-    if sample_pixels:  # Balance dataset if specified
-        burn_idx = np.where(all_labels == 1)[0]  # Get indices of burn pixels
-        unburn_idx = np.where(all_labels == 0)[0]  # Get indices of unburn pixels
-        n = min(len(burn_idx), len(unburn_idx))  # Get minimum class size
-        rng = np.random.RandomState(42)  # Initialize random number generator
-        sel = np.concatenate([  # Select balanced subset
-            rng.choice(burn_idx, n, replace=False),  # Randomly select burn indices
-            rng.choice(unburn_idx, n, replace=False)  # Randomly select unburn indices
-        ])
-        all_labels = all_labels[sel]  # Subset labels
-        all_preds = all_preds[sel]  # Subset predictions
-
-    report = classification_report(  # Compute classification report
-        all_labels, all_preds,  # Use labels and predictions
-        target_names=['Unburn', 'Burn'],  # Class names
-        output_dict=True  # Return as dictionary
-    )
-    report_df = pd.DataFrame(report).transpose()  # Convert report to DataFrame
-    print(report_df)  # Print classification report
-    report_save_dir = r'Model_Evaluation'  # Define save directory
-    os.makedirs(report_save_dir, exist_ok=True)  # Create directory if it doesn't exist
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # Generate timestamp
-    fname_report = f"classification_report_{mode}_{'balanced' if sample_pixels else 'raw'}_{ts}.csv"  # Create filename
-    report_df.to_csv(os.path.join(report_save_dir, fname_report))  # Save report as CSV
-    print(f"Saved classification report → {os.path.join(report_save_dir, fname_report)}")  # Print save confirmation
-
-    cm = confusion_matrix(all_labels, all_preds)  # Compute confusion matrix
+    # Compute metrics
+    metrics = compute_segmentation_metrics(model, dataloader, device, threshold)
     
-    plt.figure(figsize=(6, 5))  # Create figure for confusion matrix
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',  # Plot confusion matrix as heatmap
-                xticklabels=['Unburn', 'Burn'],  # X-axis labels
-                yticklabels=['Unburn', 'Burn'])  # Y-axis labels
-    plt.title(f'Confusion Matrix ({mode}, {"balanced" if sample_pixels else "raw"})')  # Set title
-    plt.ylabel('True Label')  # Set y-axis label
-    plt.xlabel('Predicted Label')  # Set x-axis label
-
+    # Print metrics
+    print(f"\n=== Segmentation Metrics ({mode}) ===")
+    print(f"IoU (Intersection over Union): {metrics['IoU']:.4f} ± {metrics['IoU_std']:.4f}")
+    print(f"Dice Coefficient: {metrics['Dice']:.4f} ± {metrics['Dice_std']:.4f}")
+    print(f"Pixel Accuracy: {metrics['Pixel_Accuracy']:.4f} ± {metrics['Pixel_Accuracy_std']:.4f}")
+    print(f"Mean Absolute Error (MAE): {metrics['MAE']:.4f} ± {metrics['MAE_std']:.4f}")
+    
+    # Create metrics DataFrame
+    metrics_df = pd.DataFrame({
+        'Metric': ['IoU', 'Dice Coefficient', 'Pixel Accuracy', 'MAE'],
+        'Mean': [metrics['IoU'], metrics['Dice'], metrics['Pixel_Accuracy'], metrics['MAE']],
+        'Std': [metrics['IoU_std'], metrics['Dice_std'], metrics['Pixel_Accuracy_std'], metrics['MAE_std']]
+    })
+    
+    # Save metrics to CSV
+    metrics_save_dir = r'Model_Evaluation'  # Define save directory
+    os.makedirs(metrics_save_dir, exist_ok=True)  # Create directory if it doesn't exist
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")  # Generate timestamp
-    cm_save_dir = r'Model_Evaluation'  # Define save directory
-    fname_cm = f"confusion_matrix_{mode}_{'balanced' if sample_pixels else 'raw'}_{ts}.png"  # Create filename
-    os.makedirs(cm_save_dir, exist_ok=True)  # Create directory if it doesn't exist
-    fname = os.path.join(cm_save_dir, fname_cm)  # Full file path
-    plt.savefig(fname, dpi=300, bbox_inches="tight")  # Save confusion matrix as PNG
-    print(f"Saved confusion matrix → {fname}")  # Print save confirmation
+    fname_metrics = f"segmentation_metrics_{mode}_{ts}.csv"  # Create filename
+    metrics_df.to_csv(os.path.join(metrics_save_dir, fname_metrics), index=False)  # Save metrics as CSV
+    print(f"Saved segmentation metrics → {os.path.join(metrics_save_dir, fname_metrics)}")  # Print save confirmation
+    
+    # Create visualization
+    plt.figure(figsize=(10, 6))  # Create figure for metrics visualization
+    x_pos = np.arange(len(metrics_df))  # X positions for bars
+    bars = plt.bar(x_pos, metrics_df['Mean'], yerr=metrics_df['Std'], 
+                   capsize=5, alpha=0.7, color=['skyblue', 'lightgreen', 'lightcoral', 'lightyellow'])
+    
+    plt.xlabel('Metrics')  # Set x-axis label
+    plt.ylabel('Score')  # Set y-axis label
+    plt.title(f'Segmentation Metrics ({mode})')  # Set title
+    plt.xticks(x_pos, metrics_df['Metric'], rotation=45)  # Set x-axis ticks
+    plt.grid(True, alpha=0.3)  # Enable grid
+    
+    # Add value labels on bars
+    for i, (bar, mean, std) in enumerate(zip(bars, metrics_df['Mean'], metrics_df['Std'])):
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + std + 0.01,
+                f'{mean:.3f}', ha='center', va='bottom', fontweight='bold')
+    
+    plt.tight_layout()  # Adjust layout
+    
+    # Save plot
+    fname_plot = f"segmentation_metrics_plot_{mode}_{ts}.png"  # Create filename
+    plot_path = os.path.join(metrics_save_dir, fname_plot)  # Full file path
+    plt.savefig(plot_path, dpi=300, bbox_inches="tight")  # Save plot as PNG
+    print(f"Saved metrics plot → {plot_path}")  # Print save confirmation
     plt.show()  # Display plot
-
-    return report_df, cm  # Return report and confusion matrix
+    
+    return metrics_df  # Return metrics DataFrame
 
 # ------------------ Main ------------------
 def main():
@@ -447,12 +506,16 @@ def main():
     # Plot loss and accuracy
     plot_metrics(train_losses, val_losses, train_accuracies, val_accuracies)  # Plot training and validation metrics
 
-    # Evaluation
-    all_preds, all_labels = get_preds_labels(model, val_dataloader, device, mode="pixels")  # Get pixel-wise predictions
-    compute_report_and_cm(all_labels, all_preds, sample_pixels=True)  # Compute and save pixel-wise metrics
-
-    all_preds, all_labels = get_preds_labels(model, val_dataloader, device, mode="tiles")  # Get tile-wise predictions
-    compute_report_and_cm(all_labels, all_preds, sample_pixels=False)  # Compute and save tile-wise metrics
+    # Evaluation with segmentation metrics
+    print("\n" + "="*50)
+    print("EVALUATION PHASE")
+    print("="*50)
+    
+    # Compute segmentation metrics for validation set
+    val_metrics_df = compute_and_save_segmentation_metrics(model, val_dataloader, device, mode="validation", threshold=0.5)
+    
+    # Compute segmentation metrics for training set (for comparison)
+    train_metrics_df = compute_and_save_segmentation_metrics(model, train_dataloader, device, mode="training", threshold=0.5)
 
     # Save model
     export_dir = "Export_Model"  # Define model save directory
