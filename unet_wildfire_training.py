@@ -37,7 +37,6 @@ import seaborn as sns                              # Statistical plotting
 import matplotlib.pyplot as plt                    # General plotting
 
 # Evaluation metrics
-from sklearn.metrics import classification_report, confusion_matrix  # Classification evaluation
 from sklearn.model_selection import train_test_split                  # Train-test data splitting
 
 
@@ -194,6 +193,180 @@ class UNet(nn.Module):
         # Return predicted segmentation map
         return logits
 
+# ------------------ Segmentation Metrics ------------------
+def calculate_iou(pred, target, smooth=1e-6):
+    """
+    Calculate Intersection over Union (IoU) for binary segmentation.
+    
+    Args:
+        pred: Predicted binary mask (numpy array)
+        target: Ground truth binary mask (numpy array)
+        smooth: Small value to avoid division by zero
+    
+    Returns:
+        IoU score (float)
+    """
+    pred = pred.astype(bool)
+    target = target.astype(bool)
+    
+    intersection = np.logical_and(pred, target).sum()
+    union = np.logical_or(pred, target).sum()
+    
+    iou = (intersection + smooth) / (union + smooth)
+    return iou
+
+def calculate_dice_coefficient(pred, target, smooth=1e-6):
+    """
+    Calculate Dice coefficient for binary segmentation.
+    
+    Args:
+        pred: Predicted binary mask (numpy array)
+        target: Ground truth binary mask (numpy array)
+        smooth: Small value to avoid division by zero
+    
+    Returns:
+        Dice coefficient (float)
+    """
+    pred = pred.astype(bool)
+    target = target.astype(bool)
+    
+    intersection = np.logical_and(pred, target).sum()
+    dice = (2.0 * intersection + smooth) / (pred.sum() + target.sum() + smooth)
+    return dice
+
+def calculate_pixel_accuracy(pred, target):
+    """
+    Calculate pixel accuracy for binary segmentation.
+    
+    Args:
+        pred: Predicted binary mask (numpy array)
+        target: Ground truth binary mask (numpy array)
+    
+    Returns:
+        Pixel accuracy (float)
+    """
+    pred = pred.astype(bool)
+    target = target.astype(bool)
+    
+    correct_pixels = np.sum(pred == target)
+    total_pixels = pred.size
+    
+    accuracy = correct_pixels / total_pixels
+    return accuracy
+
+def calculate_mae(pred, target):
+    """
+    Calculate Mean Absolute Error (MAE) for segmentation.
+    
+    Args:
+        pred: Predicted mask (numpy array, can be probabilities or binary)
+        target: Ground truth binary mask (numpy array)
+    
+    Returns:
+        MAE (float)
+    """
+    # Convert predictions to probabilities if they're binary
+    if pred.dtype == bool:
+        pred = pred.astype(float)
+    else:
+        pred = pred.astype(float)
+    
+    target = target.astype(float)
+    
+    mae = np.mean(np.abs(pred - target))
+    return mae
+
+def evaluate_segmentation_metrics(model, dataloader, device):
+    """
+    Evaluate segmentation model using IoU, Dice, Pixel Accuracy, and MAE.
+    
+    Args:
+        model: Trained PyTorch model
+        dataloader: DataLoader for evaluation
+        device: Device to run inference on
+    
+    Returns:
+        Dictionary containing all metrics
+    """
+    model.eval()
+    
+    ious = []
+    dice_scores = []
+    pixel_accuracies = []
+    maes = []
+    
+    with torch.no_grad():
+        for images, masks in tqdm(dataloader, desc="Evaluating segmentation metrics"):
+            images = images.to(device)
+            masks = masks.to(device).float()
+            
+            # Get predictions
+            outputs = model(images)
+            pred_probs = torch.sigmoid(outputs)
+            pred_binary = (pred_probs > 0.5).float()
+            
+            # Convert to numpy for metric calculation
+            pred_binary_np = pred_binary.cpu().numpy()
+            pred_probs_np = pred_probs.cpu().numpy()
+            masks_np = masks.cpu().numpy()
+            
+            # Calculate metrics for each sample in the batch
+            for i in range(pred_binary_np.shape[0]):
+                pred_bin = pred_binary_np[i, 0]  # Remove channel dimension
+                pred_prob = pred_probs_np[i, 0]  # Remove channel dimension
+                mask = masks_np[i, 0]  # Remove channel dimension
+                
+                # Calculate metrics
+                iou = calculate_iou(pred_bin, mask)
+                dice = calculate_dice_coefficient(pred_bin, mask)
+                pixel_acc = calculate_pixel_accuracy(pred_bin, mask)
+                mae = calculate_mae(pred_prob, mask)
+                
+                ious.append(iou)
+                dice_scores.append(dice)
+                pixel_accuracies.append(pixel_acc)
+                maes.append(mae)
+    
+    # Calculate mean metrics
+    metrics = {
+        'IoU': np.mean(ious),
+        'Dice_Coefficient': np.mean(dice_scores),
+        'Pixel_Accuracy': np.mean(pixel_accuracies),
+        'MAE': np.mean(maes),
+        'IoU_std': np.std(ious),
+        'Dice_std': np.std(dice_scores),
+        'Pixel_Accuracy_std': np.std(pixel_accuracies),
+        'MAE_std': np.std(maes)
+    }
+    
+    return metrics
+
+def print_segmentation_metrics(metrics, mode="pixels"):
+    """
+    Print segmentation metrics in a formatted way.
+    
+    Args:
+        metrics: Dictionary containing segmentation metrics
+        mode: Evaluation mode ("pixels" or "tiles")
+    """
+    print(f"\n=== Segmentation Metrics ({mode}) ===")
+    print(f"IoU (Intersection over Union): {metrics['IoU']:.4f} ± {metrics['IoU_std']:.4f}")
+    print(f"Dice Coefficient: {metrics['Dice_Coefficient']:.4f} ± {metrics['Dice_std']:.4f}")
+    print(f"Pixel Accuracy: {metrics['Pixel_Accuracy']:.4f} ± {metrics['Pixel_Accuracy_std']:.4f}")
+    print(f"Mean Absolute Error (MAE): {metrics['MAE']:.4f} ± {metrics['MAE_std']:.4f}")
+    
+    # Create a summary DataFrame
+    summary_data = {
+        'Metric': ['IoU', 'Dice Coefficient', 'Pixel Accuracy', 'MAE'],
+        'Mean': [metrics['IoU'], metrics['Dice_Coefficient'], 
+                metrics['Pixel_Accuracy'], metrics['MAE']],
+        'Std': [metrics['IoU_std'], metrics['Dice_std'], 
+               metrics['Pixel_Accuracy_std'], metrics['MAE_std']]
+    }
+    summary_df = pd.DataFrame(summary_data)
+    print("\nSummary Table:")
+    print(summary_df.to_string(index=False))
+
 # ------------------ Dataset ------------------
 # Custom dataset for segmentation tasks (images + masks)
 class SegmentationDataset(Dataset):
@@ -325,89 +498,6 @@ def match_raster_shapefile(image_base_dir, label_base_dir):
     # Return list of matched image-label pairs
     return pairs
 
-# Function to get predictions and labels from a trained model
-def get_preds_labels(model, dataloader, device, mode="pixels"):
-    model.eval()  # Set model to evaluation mode
-    all_preds, all_labels = [], []  # Store predictions + ground-truth labels
-
-    # Disable gradient computation (faster inference)
-    with torch.no_grad():
-        # Iterate through dataset batches
-        for images, masks in tqdm(dataloader, desc="Collecting predictions"):
-            images = images.to(device)       # Move images to GPU/CPU
-            masks = masks.to(device).float() # Move masks to device
-            
-            # Forward pass → get logits
-            outputs = model(images)
-            
-            # Apply sigmoid activation, then threshold at 0.5 → binary prediction
-            preds = torch.sigmoid(outputs) > 0.5
-
-            # Mode 1: pixel-wise evaluation
-            if mode == "pixels":
-                all_preds.extend(preds.cpu().numpy().flatten())
-                all_labels.extend(masks.cpu().numpy().flatten())
-
-            # Mode 2: tile-wise evaluation (treat whole tile as one prediction)
-            elif mode == "tiles":
-                for p, m in zip(preds, masks):
-                    # If mean predicted probability > 0.1, classify tile as positive (Burn)
-                    tile_pred = (p.cpu().numpy().mean() > 0.1).astype(int)
-                    # Same rule for ground truth
-                    tile_label = (m.cpu().numpy().mean() > 0.1).astype(int)
-                    all_preds.append(tile_pred)
-                    all_labels.append(tile_label)
-    
-    # Return numpy arrays of predictions + labels
-    return np.array(all_preds), np.array(all_labels)
-
-# Function to compute classification report + confusion matrix
-def compute_report_and_cm(all_labels, all_preds, sample_pixels=False, mode="pixels"):
-    # Optionally balance dataset by sampling equal number of burn/unburn pixels
-    if sample_pixels:
-        burn_idx = np.where(all_labels == 1)[0]   # Indices of positive samples
-        unburn_idx = np.where(all_labels == 0)[0] # Indices of negative samples
-        n = min(len(burn_idx), len(unburn_idx))   # Balance to smaller group size
-        
-        # Randomly sample balanced set
-        rng = np.random.RandomState(42)
-        sel = np.concatenate([
-            rng.choice(burn_idx, n, replace=False),
-            rng.choice(unburn_idx, n, replace=False)
-        ])
-        all_labels = all_labels[sel]
-        all_preds = all_preds[sel]
-
-    # Generate sklearn classification report (precision, recall, f1)
-    report = classification_report(
-        all_labels, all_preds,
-        target_names=['Unburn', 'Burn'],
-        output_dict=True
-    )
-    report_df = pd.DataFrame(report).transpose()
-    print(report_df)
-
-    # Compute confusion matrix
-    cm = confusion_matrix(all_labels, all_preds)
-    
-    # Plot confusion matrix as heatmap
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=['Unburn', 'Burn'],
-                yticklabels=['Unburn', 'Burn'])
-    plt.title(f'Confusion Matrix ({mode}, {"balanced" if sample_pixels else "raw"})')
-    plt.ylabel('True Label')
-    plt.xlabel('Predicted Label')
-
-    # Save confusion matrix with timestamp
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    fname = f"confusion_matrix_{mode}_{'balanced' if sample_pixels else 'raw'}_{ts}.png"
-    plt.savefig(fname, dpi=300, bbox_inches="tight")
-    print(f"Saved confusion matrix → {fname}")
-    plt.show()
-
-    # Return report dataframe + confusion matrix
-    return report_df, cm
 
 
 # ------------------ Main ------------------
@@ -551,12 +641,18 @@ def main():
         print(f"Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(train_dataloader):.4f}")
 
     # --- Evaluation ---
-    all_preds, all_labels = get_preds_labels(model, val_dataloader, device, mode="pixels")
-    compute_report_and_cm(all_labels, all_preds, sample_pixels=True)
-
-    # Optional: tile-level confusion matrix
-    all_preds, all_labels = get_preds_labels(model, val_dataloader, device, mode="tiles")
-    compute_report_and_cm(all_labels, all_preds, sample_pixels=False)
+    print("\nEvaluating model with segmentation metrics...")
+    
+    # Evaluate with pixel-level metrics
+    pixel_metrics = evaluate_segmentation_metrics(model, val_dataloader, device)
+    print_segmentation_metrics(pixel_metrics, mode="pixels")
+    
+    # Save metrics to file
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    metrics_df = pd.DataFrame([pixel_metrics])
+    metrics_file = f"segmentation_metrics_{ts}.csv"
+    metrics_df.to_csv(metrics_file, index=False)
+    print(f"\nMetrics saved to: {metrics_file}")
 
     # --- Save trained model ---
     export_dir = "Export_Model"
