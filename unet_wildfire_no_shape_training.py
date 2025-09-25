@@ -163,7 +163,7 @@ class SegmentationDataset(Dataset):
             channel = image[c]  # Get channel
             min_val, max_val = channel.min(), channel.max()  # Compute min and max values
             if max_val - min_val > 1e-6:  # Avoid division by zero
-                image[c] = (channel - min_val) / (max_val - min_val)  # Normalize to [0, 1]
+                image[c] = (channel - min_val) / (max_val - min_val)  # Normalize to [0, 1] 
             else:
                 image[c] = 0  # Set to zero if range is too small
 
