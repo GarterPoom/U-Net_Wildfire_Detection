@@ -38,6 +38,7 @@ import matplotlib.pyplot as plt                    # General plotting
 
 # Evaluation metrics
 from sklearn.model_selection import train_test_split                  # Train-test data splitting
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 
 # ------------------ U-Net Modules ------------------
@@ -254,6 +255,16 @@ def calculate_pixel_accuracy(pred, target):
     accuracy = correct_pixels / total_pixels
     return accuracy
 
+def compute_accuracy(outputs, masks, threshold=0.5):
+    """
+    Compute pixel-wise accuracy for segmentation.
+    """
+    with torch.no_grad():
+        preds = torch.sigmoid(outputs) >= threshold
+        correct = (preds == masks.bool()).float().sum()
+        total = masks.numel()
+        return correct / total
+
 def calculate_mae(pred, target):
     """
     Calculate Mean Absolute Error (MAE) for segmentation.
@@ -295,6 +306,9 @@ def evaluate_segmentation_metrics(model, dataloader, device):
     pixel_accuracies = []
     maes = []
     
+    all_preds_flat = []
+    all_masks_flat = []
+    
     with torch.no_grad():
         for images, masks in tqdm(dataloader, desc="Evaluating segmentation metrics"):
             images = images.to(device)
@@ -309,6 +323,10 @@ def evaluate_segmentation_metrics(model, dataloader, device):
             pred_binary_np = pred_binary.cpu().numpy()
             pred_probs_np = pred_probs.cpu().numpy()
             masks_np = masks.cpu().numpy()
+            
+            # Flatten predictions and masks for classification report and confusion matrix
+            all_preds_flat.append(pred_binary_np.flatten())
+            all_masks_flat.append(masks_np.flatten())
             
             # Calculate metrics for each sample in the batch
             for i in range(pred_binary_np.shape[0]):
@@ -327,6 +345,10 @@ def evaluate_segmentation_metrics(model, dataloader, device):
                 pixel_accuracies.append(pixel_acc)
                 maes.append(mae)
     
+    # Concatenate all flattened predictions and masks
+    all_preds_flat = np.concatenate(all_preds_flat)
+    all_masks_flat = np.concatenate(all_masks_flat).astype(int)
+
     # Calculate mean metrics
     metrics = {
         'IoU': np.mean(ious),
@@ -339,7 +361,7 @@ def evaluate_segmentation_metrics(model, dataloader, device):
         'MAE_std': np.std(maes)
     }
     
-    return metrics
+    return metrics, all_preds_flat, all_masks_flat
 
 def print_segmentation_metrics(metrics, mode="pixels"):
     """
@@ -366,6 +388,71 @@ def print_segmentation_metrics(metrics, mode="pixels"):
     summary_df = pd.DataFrame(summary_data)
     print("\nSummary Table:")
     print(summary_df.to_string(index=False))
+
+def save_classification_report(y_true, y_pred, save_dir='Model_Evaluation', mode='validation'):
+    """
+    Generates, prints, and saves a classification report and confusion matrix.
+    """
+    # --- Classification Report ---
+    report = classification_report(y_true, y_pred, target_names=['Unburned (0)', 'Burned (1)'])
+    print(f"\n=== Classification Report ({mode}) ===")
+    print(report)
+
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    report_path = os.path.join(save_dir, f'classification_report_{mode}_{ts}.csv')
+    with open(report_path, 'w') as f:
+        f.write(report)
+    print(f"✅ Classification report saved to {report_path}")
+
+    # --- Confusion Matrix ---
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                xticklabels=['Unburned', 'Burned'], 
+                yticklabels=['Unburned', 'Burned'])
+    plt.title(f'Confusion Matrix ({mode})')
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    
+    cm_path = os.path.join(save_dir, f'confusion_matrix_{mode}_{ts}.png')
+    plt.savefig(cm_path, dpi=300)
+    print(f"✅ Confusion matrix plot saved to {cm_path}")
+    plt.show()
+
+def plot_metrics(train_losses, val_losses, train_accuracies, val_accuracies, save_dir='Model_Evaluation'):
+    """
+    Plots and saves the training/validation loss and accuracy curves.
+    """
+    epochs = range(1, len(train_losses) + 1)
+    plt.figure(figsize=(14, 6))
+
+    # Plot Loss
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs, train_losses, 'bo-', label='Training Loss')
+    plt.plot(epochs, val_losses, 'ro-', label='Validation Loss')
+    plt.title('Training and Validation Loss')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.grid(True)
+
+    # Plot Accuracy
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs, train_accuracies, 'bo-', label='Training Accuracy')
+    plt.plot(epochs, val_accuracies, 'ro-', label='Validation Accuracy')
+    plt.title('Training and Validation Accuracy')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    save_path = os.path.join(save_dir, f'training_metrics_{ts}.png')
+    plt.savefig(save_path, dpi=300)
+    print(f"✅ Training metrics plot saved to {save_path}")
+    plt.show()
 
 # ------------------ Dataset ------------------
 # Custom dataset for segmentation tasks (images + masks)
@@ -395,6 +482,9 @@ class SegmentationDataset(Dataset):
             # Reproject vector labels to raster CRS if needed
             if gdf.crs != src.crs:
                 gdf = gdf.to_crs(src.crs)
+
+            # Clean invalid geometries using buffer(0) trick
+            gdf.geometry = gdf.geometry.buffer(0)
             
             # Store aligned geodataframe
             self.gdf_list.append(gdf)
@@ -473,32 +563,65 @@ class SegmentationDataset(Dataset):
         # Return PyTorch tensors (image, mask)
         return torch.from_numpy(image), torch.from_numpy(mask)
 
-# Function to match raster (images) with shapefile (labels)
+# Function to match raster (images) with shapefile (labels) by spatial overlap
 def match_raster_shapefile(image_base_dir, label_base_dir):
     # Recursively find all .tif image files
     image_files = glob.glob(os.path.join(image_base_dir, "**", "*.tif"), recursive=True)
     # Recursively find all .shp shapefile label files
     label_files = glob.glob(os.path.join(label_base_dir, "**", "*.shp"), recursive=True)
 
-    # Helper function: extract file base name (no extension)
-    def get_base_name(path):
-        return os.path.splitext(os.path.basename(path))[0]
-
     pairs = []  # To store matched (image, label) pairs
     
     # Loop through all images
-    for img in image_files:
-        base = get_base_name(img)  # Base name of image
-        # Look for shapefile labels that share the same prefix
-        matches = [lbl for lbl in label_files if get_base_name(lbl).startswith(base)]
-        # If found, keep first match
-        if matches:
-            pairs.append((img, matches[0]))
+    for img_path in image_files:
+        try:
+            # Get raster bounds and CRS
+            with rasterio.open(img_path) as src:
+                img_bounds = src.bounds  # (left, bottom, right, top)
+                img_crs = src.crs
+                img_polygon = box(*img_bounds)  # Create polygon from bounds
+            
+            # Find shapefiles that spatially overlap with this raster
+            overlapping_labels = []
+            
+            for label_path in label_files:
+                try:
+                    # Load shapefile
+                    gdf = gpd.read_file(label_path)
+                    
+                    # Skip if empty
+                    if gdf.empty:
+                        continue
+                    
+                    # Reproject to raster CRS if needed
+                    if gdf.crs != img_crs:
+                        gdf = gdf.to_crs(img_crs)
+
+                    # Clean invalid geometries using buffer(0) trick
+                    gdf.geometry = gdf.geometry.buffer(0)
+                    
+                    # Check for spatial overlap
+                    # Check if any polygon intersects with raster bounds
+                    if gdf.geometry.intersects(img_polygon).any():
+                        overlapping_labels.append(label_path)
+                        
+                except Exception as e:
+                    print(f"Warning: Could not process shapefile {label_path}: {e}")
+                    continue
+            
+            # If we found overlapping shapefiles, add the first one
+            if overlapping_labels:
+                pairs.append((img_path, overlapping_labels[0]))
+                print(f"Matched: {os.path.basename(img_path)} <-> {os.path.basename(overlapping_labels[0])}")
+            else:
+                print(f"No overlapping shapefile found for: {os.path.basename(img_path)}")
+                
+        except Exception as e:
+            print(f"Warning: Could not process raster {img_path}: {e}")
+            continue
     
-    # Return list of matched image-label pairs
+    print(f"\nTotal matched pairs: {len(pairs)}")
     return pairs
-
-
 
 # ------------------ Main ------------------
 def main():
@@ -625,10 +748,15 @@ def main():
 
     # --- Training Loop ---
     num_epochs = 50
+    train_losses, val_losses = [], []
+    train_accuracies, val_accuracies = [], []
+
     for epoch in range(num_epochs):
+        # --- Training Phase ---
         model.train()
         running_loss = 0.0
-        for images, masks in tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
+        running_accuracy = 0.0
+        for images, masks in tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]", leave=False):
             images, masks = images.to(device), masks.to(device).float()
             
             optimizer.zero_grad()
@@ -636,16 +764,51 @@ def main():
             loss = criterion(outputs, masks)
             loss.backward()
             optimizer.step()
-            
-            running_loss += loss.item()
-        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(train_dataloader):.4f}")
 
+            running_loss += loss.item() * images.size(0)
+            running_accuracy += compute_accuracy(outputs, masks).item() * images.size(0)
+
+        epoch_train_loss = running_loss / len(train_dataloader.dataset)
+        epoch_train_acc = running_accuracy / len(train_dataloader.dataset)
+        train_losses.append(epoch_train_loss)
+        train_accuracies.append(epoch_train_acc)
+
+        # --- Validation Phase ---
+        model.eval()
+        val_loss = 0.0
+        val_accuracy = 0.0
+        with torch.no_grad():
+            for images, masks in tqdm(val_dataloader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]", leave=False):
+                images, masks = images.to(device), masks.to(device).float()
+                outputs = model(images)
+                loss = criterion(outputs, masks)
+                
+                val_loss += loss.item() * images.size(0)
+                val_accuracy += compute_accuracy(outputs, masks).item() * images.size(0)
+
+        epoch_val_loss = val_loss / len(val_dataloader.dataset)
+        epoch_val_acc = val_accuracy / len(val_dataloader.dataset)
+        val_losses.append(epoch_val_loss)
+        val_accuracies.append(epoch_val_acc)
+
+        print(
+            f"Epoch {epoch+1}/{num_epochs} | "
+            f"Train Loss: {epoch_train_loss:.4f}, Train Acc: {epoch_train_acc:.4f} | "
+            f"Val Loss: {epoch_val_loss:.4f}, Val Acc: {epoch_val_acc:.4f}"
+        )
+
+    # --- Plotting ---
+    plot_metrics(train_losses, val_losses, train_accuracies, val_accuracies)
+    
     # --- Evaluation ---
     print("\nEvaluating model with segmentation metrics...")
     
     # Evaluate with pixel-level metrics
-    pixel_metrics = evaluate_segmentation_metrics(model, val_dataloader, device)
+    pixel_metrics, y_pred, y_true = evaluate_segmentation_metrics(model, val_dataloader, device)
     print_segmentation_metrics(pixel_metrics, mode="pixels")
+
+    # Generate and save classification report and confusion matrix
+    save_classification_report(y_true, y_pred, mode='validation')
     
     # Save metrics to file
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -665,4 +828,3 @@ def main():
 # Run main if script is executed directly
 if __name__ == "__main__":
     main()
-
