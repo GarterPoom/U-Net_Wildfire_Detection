@@ -1,6 +1,11 @@
 # Core Python utilities
-import os        # For file and directory operations
+import os  # For file and directory operations
+
+# Set environment variables for PROJ data and threading issues on Windows
 import glob      # For pattern-based file searching
+import warnings  # For suppressing warnings
+import re        # For date extraction from filenames
+import sys # For system-specific parameters and functions
 
 # PyTorch (Deep Learning Framework)
 import torch
@@ -11,6 +16,9 @@ import torch.optim as optim        # Optimizers (SGD, Adam, etc.) for training m
 import platform                    # Get system/OS information
 import psutil                      # Monitor system resource usage (CPU, memory, etc.)
 import datetime                    # Work with timestamps and logs
+
+# The following environment variables are set to prevent numerical libraries (like NumPy, PyTorch)
+# from using multiple CPU threads. This can sometimes improve performance for inference tasks by
 
 # PyTorch Dataset utilities
 from torch.utils.data import Dataset, DataLoader  # Dataset & batching utilities for model training
@@ -40,158 +48,96 @@ import matplotlib.pyplot as plt                    # General plotting
 from sklearn.model_selection import train_test_split                  # Train-test data splitting
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
-
 # ------------------ U-Net Modules ------------------
-# Import torch's neural network module base class
 class DoubleConv(nn.Module):
+    """(Convolution => Batch Normalization => ReLU) * 2"""
     def __init__(self, in_channels, out_channels):
-        # Initialize the parent nn.Module class
         super().__init__()
-        
-        # Define a block with 2 consecutive convolutional layers
         self.double_conv = nn.Sequential(
-            # First 2D convolution
-            # - Input channels: in_channels
-            # - Output channels: out_channels
-            # - Kernel size: 3x3
-            # - Padding=1 keeps spatial dimensions the same
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            
-            # Normalize activations across batch to stabilize training
             nn.BatchNorm2d(out_channels),
-            
-            # ReLU activation (applied in place to save memory)
             nn.ReLU(inplace=True),
-            
-            # Second 2D convolution with same out_channels
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-            
-            # Another batch normalization
             nn.BatchNorm2d(out_channels),
-            
-            # ReLU activation again
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
         )
 
-    # Define the forward pass
     def forward(self, x):
-        # Apply the sequential double convolution to input tensor x
         return self.double_conv(x)
 
-# Block for downsampling: MaxPool + DoubleConv
+
 class Down(nn.Module):
+    """Downscaling with maxpool then double conv"""
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        
-        # Downsampling step
         self.maxpool_conv = nn.Sequential(
-            # Reduce spatial resolution by factor of 2
             nn.MaxPool2d(2),
-            
-            # Apply double convolution after pooling
             DoubleConv(in_channels, out_channels)
         )
 
     def forward(self, x):
-        # Apply max pooling then double convolution
         return self.maxpool_conv(x)
 
-# Block for upsampling: ConvTranspose + concatenation + DoubleConv
+
 class Up(nn.Module):
+    """Upscaling then double conv"""
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        
-        # Transposed convolution (also called deconvolution) to upsample
-        # Reduces channel depth by half (in_channels -> in_channels // 2)
-        # Increases spatial size by stride=2
-        self.up = nn.ConvTranspose2d(in_channels, in_channels // 2,
-                                     kernel_size=2, stride=2)
-        
-        # Apply double convolution after concatenation
-        # Input channels: in_channels (because x1+ x2 concatenated)
+        self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
         self.conv = DoubleConv(in_channels, out_channels)
 
     def forward(self, x1, x2):
-        # x1 = decoder input (upsampled features)
-        # x2 = encoder skip connection features
-        
-        # Perform upsampling with transposed convolution
         x1 = self.up(x1)
         
-        # Compute differences in spatial dimensions (height/width)
-        diffY = x2.size()[2] - x1.size()[2]  # Difference in height
-        diffX = x2.size()[3] - x1.size()[3]  # Difference in width
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
         
-        # Pad x1 so it matches the size of x2 (important when input dims are odd)
-        x1 = nn.functional.pad(x1, [
-            diffX // 2, diffX - diffX // 2,   # Left and right padding
-            diffY // 2, diffY - diffY // 2    # Top and bottom padding
-        ])
-        
-        # Concatenate along channel dimension (dim=1 for NCHW format)
+        x1 = nn.functional.pad(x1,
+                               [diffX // 2, diffX - diffX // 2,
+                                diffY // 2, diffY - diffY // 2])
+                               
         x = torch.cat([x2, x1], dim=1)
-        
-        # Apply double convolution to merged features
         return self.conv(x)
 
-# Final convolution to map features to desired output classes
+
 class OutConv(nn.Module):
+    """Final output convolution"""
     def __init__(self, in_channels, out_channels):
         super().__init__()
-        
-        # 1x1 convolution to reduce channels -> num_classes
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
-        # Apply final convolution (no activation here, usually softmax/sigmoid later)
         return self.conv(x)
 
-# Define the full U-Net model
+
 class UNet(nn.Module):
+    """The full U-Net model architecture."""
     def __init__(self, n_channels, n_classes):
-        # Initialize parent nn.Module class
         super(UNet, self).__init__()
-
-        # Initial convolution block (input -> 64 channels)
-        # Takes in n_channels (e.g., 3 for RGB images, or 1 for grayscale)
         self.inc = DoubleConv(n_channels, 64)
-
-        # Encoder (downsampling path)
-        # Each Down block halves spatial dimensions and increases feature depth
-        self.down1 = Down(64, 128)     # 64 -> 128 channels
-        self.down2 = Down(128, 256)    # 128 -> 256 channels
-        self.down3 = Down(256, 512)    # 256 -> 512 channels
-        self.down4 = Down(512, 1024)   # 512 -> 1024 channels (bottleneck)
-
-        # Decoder (upsampling path with skip connections)
-        # Each Up block doubles spatial resolution and concatenates encoder features
-        self.up1 = Up(1024, 512)       # 1024 -> 512 channels
-        self.up2 = Up(512, 256)        # 512 -> 256 channels
-        self.up3 = Up(256, 128)        # 256 -> 128 channels
-        self.up4 = Up(128, 64)         # 128 -> 64 channels
-
-        # Final output convolution (maps 64 -> n_classes)
-        # n_classes = 1 for binary segmentation, or >1 for multi-class
+        self.down1 = Down(64, 128)
+        self.down2 = Down(128, 256)
+        self.down3 = Down(256, 512)
+        self.down4 = Down(512, 1024)
+        self.up1 = Up(1024, 512)
+        self.up2 = Up(512, 256)
+        self.up3 = Up(256, 128)
+        self.up4 = Up(128, 64)
         self.outc = OutConv(64, n_classes)
 
     def forward(self, x):
-        # Encoder forward pass
-        x1 = self.inc(x)     # First conv block (input -> 64)
-        x2 = self.down1(x1)  # Downsample (64 -> 128)
-        x3 = self.down2(x2)  # Downsample (128 -> 256)
-        x4 = self.down3(x3)  # Downsample (256 -> 512)
-        x5 = self.down4(x4)  # Bottleneck (512 -> 1024)
-
-        # Decoder forward pass (upsample + concatenate with encoder features)
-        x = self.up1(x5, x4) # Up 1024 -> 512, concat with x4
-        x = self.up2(x, x3)  # Up 512 -> 256, concat with x3
-        x = self.up3(x, x2)  # Up 256 -> 128, concat with x2
-        x = self.up4(x, x1)  # Up 128 -> 64, concat with x1
-
-        # Final output layer (per-pixel class logits)
+        x1 = self.inc(x)
+        x2 = self.down1(x1)
+        x3 = self.down2(x2)
+        x4 = self.down3(x3)
+        x5 = self.down4(x4)
+        
+        x = self.up1(x5, x4)
+        x = self.up2(x, x3)
+        x = self.up3(x, x2)
+        x = self.up4(x, x1)
+        
         logits = self.outc(x)
-
-        # Return predicted segmentation map
         return logits
 
 # ------------------ Segmentation Metrics ------------------
@@ -494,74 +440,87 @@ class SegmentationDataset(Dataset):
         return len(self.windows)
 
     # Retrieve an item by index
-    def __getitem__(self, idx):
-        # Extract image index + raster window for this sample
+    def __getitem__(self, idx, _retries=0):
+        if _retries > 10:
+            raise RuntimeError(f"Exceeded maximum retries ({_retries}) attempting to read a valid tile. Dataset might be severely corrupted.")
+
         img_idx, window = self.windows[idx]
-        
-        # Get paths and CRS for this image
         image_path = self.image_paths[img_idx]
-        gdf = self.gdf_list[img_idx]
-        crs = self.crs_list[img_idx]
 
-        # Open raster and read tile
-        with rasterio.open(image_path) as src:
-            # Read selected bands (subset of channels) inside given window
-            image = src.read(self.bands[img_idx], window=window)
+        try:
+            gdf = self.gdf_list[img_idx]
+            crs = self.crs_list[img_idx]
+
+            # Open raster and read tile
+            with rasterio.open(image_path) as src:
+                # Read selected bands (subset of channels) inside given window
+                image = src.read(self.bands[img_idx], window=window)
+                
+                # Transform for this tile window
+                tile_transform = src.window_transform(window)
+                
+                # Dimensions of the tile
+                height = window.height
+                width = window.width
+                
+                # Geographic bounding box of the tile
+                bounds = rasterio.windows.bounds(window, src.transform)
+
+            # Clip vector labels to the current tile bounding box
+            clipped_gdf = gdf.clip(bounds)
             
-            # Transform for this tile window
-            tile_transform = src.window_transform(window)
+            # Convert polygons to rasterizable shapes (geometry + class=1)
+            shapes = [(mapping(geom), 1) for geom in clipped_gdf.geometry if not geom.is_empty]
             
-            # Dimensions of the tile
-            height = window.height
-            width = window.width
+            # Rasterize clipped polygons into binary mask
+            mask = rasterize(
+                shapes,
+                out_shape=(height, width),    # Match tile dimensions
+                transform=tile_transform,     # Use tile’s transform
+                fill=0,                       # Background = 0
+                all_touched=True,             # Label all pixels touched by geometry
+                dtype=np.uint8
+            )
+
+            # Resize image to target size (H,W,C), reflect padding + anti-alias
+            image = resize(
+                image.transpose(1, 2, 0),     # Change from (C,H,W) -> (H,W,C)
+                self.target_size + (self.num_bands,),
+                mode='reflect',
+                anti_aliasing=True
+            )
             
-            # Geographic bounding box of the tile
-            bounds = rasterio.windows.bounds(window, src.transform)
+            # Back to PyTorch format (C,H,W) and convert to float32
+            image = image.transpose(2, 0, 1).astype(np.float32)
 
-        # Clip vector labels to the current tile bounding box
-        clipped_gdf = gdf.clip(bounds)
-        
-        # Convert polygons to rasterizable shapes (geometry + class=1)
-        shapes = [(mapping(geom), 1) for geom in clipped_gdf.geometry if not geom.is_empty]
-        
-        # Rasterize clipped polygons into binary mask
-        mask = rasterize(
-            shapes,
-            out_shape=(height, width),    # Match tile dimensions
-            transform=tile_transform,     # Use tile’s transform
-            fill=0,                       # Background = 0
-            all_touched=True,             # Label all pixels touched by geometry
-            dtype=np.uint8
-        )
+            # Normalize each channel (min-max scaling to [0,1])
+            for c in range(image.shape[0]):
+                channel = image[c]
+                min_val, max_val = channel.min(), channel.max()
+                if max_val - min_val > 1e-6:   # Avoid division by zero
+                    image[c] = (channel - min_val) / (max_val - min_val)
+                else:
+                    image[c] = 0               # If flat channel, set to zero
 
-        # Resize image to target size (H,W,C), reflect padding + anti-alias
-        image = resize(
-            image.transpose(1, 2, 0),     # Change from (C,H,W) -> (H,W,C)
-            self.target_size + (self.num_bands,),
-            mode='reflect',
-            anti_aliasing=True
-        )
-        
-        # Back to PyTorch format (C,H,W) and convert to float32
-        image = image.transpose(2, 0, 1).astype(np.float32)
+            # Resize mask to target size (nearest neighbor, no anti-alias)
+            mask = resize(mask, self.target_size, order=0, anti_aliasing=False).astype(np.uint8)
+            
+            # Add channel dimension -> (1,H,W)
+            mask = mask[None, :, :]
 
-        # Normalize each channel (min-max scaling to [0,1])
-        for c in range(image.shape[0]):
-            channel = image[c]
-            min_val, max_val = channel.min(), channel.max()
-            if max_val - min_val > 1e-6:   # Avoid division by zero
-                image[c] = (channel - min_val) / (max_val - min_val)
-            else:
-                image[c] = 0               # If flat channel, set to zero
+            # Return PyTorch tensors (image, mask)
+            return torch.from_numpy(image), torch.from_numpy(mask)
+        except Exception as e:
+            print(f"Warning: Error reading tile at index {idx} from {image_path}: {e}")
+            # If a tile is corrupted, try to return a random valid tile to prevent the training from crashing
+            new_idx = np.random.randint(0, len(self.windows))
+            return self.__getitem__(new_idx, _retries + 1)
 
-        # Resize mask to target size (nearest neighbor, no anti-alias)
-        mask = resize(mask, self.target_size, order=0, anti_aliasing=False).astype(np.uint8)
-        
-        # Add channel dimension -> (1,H,W)
-        mask = mask[None, :, :]
-
-        # Return PyTorch tensors (image, mask)
-        return torch.from_numpy(image), torch.from_numpy(mask)
+def extract_date_string(path):
+    """Extracts an 8-digit date string (YYYYMMDD) from a file path."""
+    filename = os.path.basename(path)
+    match = re.search(r'(\d{8})', filename)
+    return match.group(1) if match else None
 
 # Function to match raster (images) with shapefile (labels) by spatial overlap
 def match_raster_shapefile(image_base_dir, label_base_dir):
@@ -574,6 +533,7 @@ def match_raster_shapefile(image_base_dir, label_base_dir):
     
     # Loop through all images
     for img_path in image_files:
+        img_date = extract_date_string(img_path)
         try:
             # Get raster bounds and CRS
             with rasterio.open(img_path) as src:
@@ -586,6 +546,11 @@ def match_raster_shapefile(image_base_dir, label_base_dir):
             
             for label_path in label_files:
                 try:
+                    # Match by date if both filenames contain a date string
+                    label_date = extract_date_string(label_path)
+                    if img_date and label_date and img_date != label_date:
+                        continue
+
                     # Load shapefile
                     gdf = gpd.read_file(label_path)
                     
@@ -625,6 +590,8 @@ def match_raster_shapefile(image_base_dir, label_base_dir):
 
 # ------------------ Main ------------------
 def main():
+    warnings.filterwarnings("ignore", category=RuntimeWarning, module="pyogrio.raw")
+    
     # Select device: GPU if available, else CPU
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
@@ -730,8 +697,8 @@ def main():
     val_dataset = SegmentationDataset(all_image_paths, all_label_paths, val_windows, bands=adjusted_bands)
 
     # DataLoader for batching
-    train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
-    val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)
+    train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
+    val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=0)
 
     # --- Loss weighting ---
     print("Computing pixel class weights...")
@@ -747,7 +714,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
     # --- Training Loop ---
-    num_epochs = 50
+    num_epochs = 20
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
 

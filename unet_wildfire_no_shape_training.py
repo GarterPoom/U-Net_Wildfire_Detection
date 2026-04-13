@@ -1,5 +1,5 @@
 # Core Python utilities
-import os  # Importing os for file and directory operations
+import os  # For file and directory operations
 import glob  # Importing glob for file pattern matching
 
 # PyTorch (Deep Learning Framework)
@@ -433,8 +433,8 @@ def main():
     val_dataset = SegmentationDataset(image_paths, val_windows, num_bands=max_channels)  # Create validation dataset
 
     # DataLoaders
-    train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)  # Create training DataLoader
-    val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)  # Create validation DataLoader
+    train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)  # Create training DataLoader
+    val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=0)  # Create validation DataLoader
 
     # Loss weighting
     print("Computing pixel class weights...")  # Print status
