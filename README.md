@@ -240,8 +240,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## 📞 Contact
 
 For questions, issues, or collaboration opportunities:
-- **Repository**: [GitHub Issues](https://github.com/your-username/gistda-wildfire-unet/issues)
-- **Email**: [your-email@domain.com]
+- **Email**: [siripoom.su@gmail.com]
 - **Organization**: GISTDA
 
 ---
