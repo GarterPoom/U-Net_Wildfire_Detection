@@ -4,15 +4,6 @@
 # --------------------- Imports and Environment Setup ---------------------
 
 import os
-# The following environment variables are set to prevent numerical libraries (like NumPy, PyTorch)
-# from using multiple CPU threads. This can sometimes improve performance for inference tasks by
-# avoiding overhead, especially when the main workload is on the GPU.
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1" 
-
 import torch  # The main PyTorch library for deep learning.
 import torch.nn as nn  # PyTorch's neural network module, used to build the U-Net.
 import rasterio  # A library for reading and writing geospatial raster data, like GeoTIFF files.

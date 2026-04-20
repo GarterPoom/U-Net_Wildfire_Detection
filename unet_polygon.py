@@ -111,6 +111,7 @@ def create_polygon_shapefile_from_burnt_areas(tif_file_path, output_folder, admi
 
     # Create GeoDataFrame with the found geometries
     gdf = gpd.GeoDataFrame(geometry=geoms, crs=crs)
+    gdf['geometry'] = gdf.geometry.make_valid()
     
     # Calculate area in original projection
     gdf['AREA'] = gdf.geometry.area
@@ -134,11 +135,16 @@ def create_polygon_shapefile_from_burnt_areas(tif_file_path, output_folder, admi
     for country, admin_path in admin_shp_paths.items():
         try:
             admin_gdf = gpd.read_file(admin_path).to_crs(gdf.crs)
+            
+            # Fix invalid geometries often found in administrative boundary datasets
+            admin_gdf['geometry'] = admin_gdf.geometry.make_valid()
+            
             if 'COUNTRY' not in admin_gdf.columns:
                 admin_gdf['COUNTRY'] = country
             
             # Make sure to keep the AP_EN and PV_EN columns from admin_gdf
             country_intersection = gpd.overlay(gdf, admin_gdf, how='intersection')
+            country_intersection['geometry'] = country_intersection.geometry.make_valid()
             
             if not country_intersection.empty:
                 intersected_results.append(country_intersection)
@@ -153,6 +159,10 @@ def create_polygon_shapefile_from_burnt_areas(tif_file_path, output_folder, admi
     
     final_gdf = pd.concat(intersected_results, ignore_index=True)
 
+    # Filter out non-polygon geometries and artifacts that cause pyogrio write warnings
+    final_gdf = final_gdf[final_gdf.geometry.is_valid & ~final_gdf.geometry.is_empty]
+    final_gdf = final_gdf[final_gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+
     # Instead of using the values from gdf_attr directly, create a constant value for all rows
     fire_date = extract_fire_date_from_filename(os.path.basename(tif_file_path))
     
@@ -164,7 +174,7 @@ def create_polygon_shapefile_from_burnt_areas(tif_file_path, output_folder, admi
     final_gdf['LONGITUDE'] = final_gdf.geometry.centroid.to_crs(epsg=4326).x
 
     # Keep other columns as they are
-    final_gdf['AREA'] = final_gdf.get('AREA', pd.NA) # Get Area in Square Meter Unit
+    final_gdf['AREA'] = final_gdf.geometry.area # Recalculate area for the potentially clipped polygons
     final_gdf['AREA_RAI'] = final_gdf['AREA'] / 1600 # Calculate Area in Rai which is Thai Area Measure Unit, Which is 1 Rai = 1600 sqm.
     final_gdf['TB_TN'] = final_gdf.get('TB_TN', pd.NA)  # Get TB_TN from admin boundaries
     final_gdf['AP_TN'] = final_gdf.get('AP_TN', pd.NA)  # Get AP_TN from admin boundaries

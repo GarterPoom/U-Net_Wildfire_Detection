@@ -1,3 +1,5 @@
+import os
+
 from classified_image_processing import main as resampling # Import Main module from classified_image_processing
 from classified_cloud_mask import main as cloud_mask # Import Main module from classified_cloud_mask
 from unet_wildfire_predict import main as wildfire # Import Main module from wildfire_classified

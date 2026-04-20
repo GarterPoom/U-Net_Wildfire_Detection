@@ -11,6 +11,10 @@ import torch.optim as optim        # Optimizers (SGD, Adam, etc.) for training m
 import platform                    # Get system/OS information
 import psutil                      # Monitor system resource usage (CPU, memory, etc.)
 import datetime                    # Work with timestamps and logs
+import warnings                    # Hides warning messages
+
+# Suppress Pyogrio RuntimeWarning about unexpected geometries (e.g. less than 4 points)
+warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*organizePolygons.*")
 
 # PyTorch Dataset utilities
 from torch.utils.data import Dataset, DataLoader  # Dataset & batching utilities for model training
@@ -730,8 +734,8 @@ def main():
     val_dataset = SegmentationDataset(all_image_paths, all_label_paths, val_windows, bands=adjusted_bands)
 
     # DataLoader for batching
-    train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)
-    val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)
+    train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
+    val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=0)
 
     # --- Loss weighting ---
     print("Computing pixel class weights...")
@@ -747,7 +751,7 @@ def main():
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
     # --- Training Loop ---
-    num_epochs = 50
+    num_epochs = 20
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
 
