@@ -4,6 +4,14 @@
 # --------------------- Imports and Environment Setup ---------------------
 
 import os  # For file and directory operations
+import sys # For system-specific parameters and functions
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+# Set PROJ_LIB to ensure the correct PROJ database is used from the Conda environment
+proj_path = os.path.join(sys.prefix, 'Library', 'share', 'proj')
+if os.path.exists(proj_path):
+    os.environ['PROJ_LIB'] = proj_path
+
 import torch  # The main PyTorch library for deep learning.
 import torch.nn as nn  # PyTorch's neural network module, used to build the U-Net.
 import rasterio  # A library for reading and writing geospatial raster data, like GeoTIFF files.

@@ -1,5 +1,11 @@
 import os # For file and directory operations
 import sys # For system-specific parameters and functions
+
+# Set PROJ_LIB to ensure the correct PROJ database is used from the Conda environment
+proj_path = os.path.join(sys.prefix, 'Library', 'share', 'proj')
+if os.path.exists(proj_path):
+    os.environ['PROJ_LIB'] = proj_path
+
 import numpy as np # For numerical operations
 from osgeo import gdal # For geospatial data processing
 from pathlib import Path # For path manipulations

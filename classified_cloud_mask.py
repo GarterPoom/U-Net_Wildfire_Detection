@@ -1,6 +1,13 @@
 # Import the os module for operating system interactions, such as file and directory handling
 import os
 # Import the logging module for logging messages and debugging
+import sys # For system-specific parameters and functions
+
+# Set PROJ_LIB to ensure the correct PROJ database is used from the Conda environment
+proj_path = os.path.join(sys.prefix, 'Library', 'share', 'proj')
+if os.path.exists(proj_path):
+    os.environ['PROJ_LIB'] = proj_path
+
 import logging
 # Import the typing module for type hinting support
 import typing

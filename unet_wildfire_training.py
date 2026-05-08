@@ -1,11 +1,19 @@
 # Core Python utilities
 import os  # For file and directory operations
+import sys # For system-specific parameters and functions
+
+# Set environment variable to allow multiple OpenMP runtimes on Windows
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE' 
+
+# Set PROJ_LIB to ensure the correct PROJ database is used from the Conda environment
+proj_path = os.path.join(sys.prefix, 'Library', 'share', 'proj')
+if os.path.exists(proj_path):
+    os.environ['PROJ_LIB'] = proj_path
 
 # Set environment variables for PROJ data and threading issues on Windows
 import glob      # For pattern-based file searching
 import warnings  # For suppressing warnings
 import re        # For date extraction from filenames
-import sys # For system-specific parameters and functions
 
 # PyTorch (Deep Learning Framework)
 import torch
@@ -16,9 +24,6 @@ import torch.optim as optim        # Optimizers (SGD, Adam, etc.) for training m
 import platform                    # Get system/OS information
 import psutil                      # Monitor system resource usage (CPU, memory, etc.)
 import datetime                    # Work with timestamps and logs
-
-# The following environment variables are set to prevent numerical libraries (like NumPy, PyTorch)
-# from using multiple CPU threads. This can sometimes improve performance for inference tasks by
 
 # PyTorch Dataset utilities
 from torch.utils.data import Dataset, DataLoader  # Dataset & batching utilities for model training
@@ -50,252 +55,529 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 
 # ------------------ U-Net Modules ------------------
 class DoubleConv(nn.Module):
-    """(Convolution => Batch Normalization => ReLU) * 2"""
+    """
+    Double Convolution Block for U-Net Architecture.
+
+    This module applies two consecutive convolutional operations, each followed by
+    batch normalization and ReLU activation. This pattern is fundamental in U-Net
+    for feature extraction and processing at each resolution level.
+
+    The block consists of:
+    1. Conv2d (3x3, padding=1) -> BatchNorm2d -> ReLU
+    2. Conv2d (3x3, padding=1) -> BatchNorm2d -> ReLU
+
+    Args:
+        in_channels (int): Number of input channels (e.g., 3 for RGB images)
+        out_channels (int): Number of output channels/feature maps
+
+    Attributes:
+        double_conv (nn.Sequential): Sequential container holding the two conv blocks
+    """
     def __init__(self, in_channels, out_channels):
-        super().__init__()
+        super().__init__()  # Initialize the parent nn.Module class
+        # Create a sequential block with two convolution-normalization-activation layers
         self.double_conv = nn.Sequential(
+            # First convolution: 3x3 kernel, same padding to maintain spatial dimensions
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            # Batch normalization to stabilize training and reduce internal covariate shift
             nn.BatchNorm2d(out_channels),
+            # ReLU activation for non-linearity
             nn.ReLU(inplace=True),
+            # Second convolution: another 3x3 kernel with same padding
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            # Another batch normalization layer
             nn.BatchNorm2d(out_channels),
+            # Final ReLU activation
             nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
+        # Pass input tensor through the sequential double convolution block
         return self.double_conv(x)
 
 
 class Down(nn.Module):
-    """Downscaling with maxpool then double conv"""
+    """
+    Downsampling Block for U-Net Encoder.
+
+    This module performs spatial downsampling in the encoder path of U-Net by:
+    1. Applying max pooling to reduce spatial dimensions by factor of 2
+    2. Following with a DoubleConv block to process the downsampled features
+
+    This reduces the spatial resolution while increasing the number of feature channels,
+    allowing the network to capture both local and global context.
+
+    Args:
+        in_channels (int): Number of input channels from previous layer
+        out_channels (int): Number of output channels after downsampling (typically 2x in_channels)
+
+    Attributes:
+        maxpool_conv (nn.Sequential): Sequential container with MaxPool2d followed by DoubleConv
+    """
     def __init__(self, in_channels, out_channels):
-        super().__init__()
+        super().__init__()  # Initialize the parent nn.Module class
+        # Sequential block: MaxPool for downsampling, then DoubleConv for feature processing
         self.maxpool_conv = nn.Sequential(
+            # Max pooling with 2x2 kernel and stride 2 to halve spatial dimensions
             nn.MaxPool2d(2),
+            # Double convolution block to process downsampled features
             DoubleConv(in_channels, out_channels)
         )
 
     def forward(self, x):
+        # Apply max pooling followed by double convolution
         return self.maxpool_conv(x)
 
 
 class Up(nn.Module):
-    """Upscaling then double conv"""
+    """
+    Upsampling Block for U-Net Decoder.
+
+    This module performs spatial upsampling in the decoder path of U-Net by:
+    1. Using transposed convolution to increase spatial dimensions by factor of 2
+    2. Concatenating with skip connection features from encoder
+    3. Applying DoubleConv to process the combined features
+
+    The skip connections help preserve spatial information lost during downsampling.
+
+    Args:
+        in_channels (int): Number of input channels from previous decoder layer
+        out_channels (int): Number of output channels after upsampling
+
+    Attributes:
+        up (nn.ConvTranspose2d): Transposed convolution layer for upsampling
+        conv (DoubleConv): Double convolution block for feature processing after concatenation
+    """
     def __init__(self, in_channels, out_channels):
-        super().__init__()
+        super().__init__()  # Initialize the parent nn.Module class
+        # Transposed convolution for upsampling: reduces channels by 2, increases spatial size by 2
         self.up = nn.ConvTranspose2d(in_channels, in_channels // 2, kernel_size=2, stride=2)
+        # Double convolution block to process concatenated features
         self.conv = DoubleConv(in_channels, out_channels)
 
     def forward(self, x1, x2):
+        # Upsample the input from previous decoder layer
         x1 = self.up(x1)
         
-        diffY = x2.size()[2] - x1.size()[2]
-        diffX = x2.size()[3] - x1.size()[3]
+        # Calculate padding needed to match skip connection spatial dimensions
+        # x2 is the skip connection from encoder at same spatial resolution
+        diffY = x2.size()[2] - x1.size()[2]  # Height difference
+        diffX = x2.size()[3] - x1.size()[3]  # Width difference
         
-        x1 = nn.functional.pad(x1,
-                               [diffX // 2, diffX - diffX // 2,
-                                diffY // 2, diffY - diffY // 2])
-                               
+        # Apply symmetric padding to upsampled tensor to match skip connection size
+        x1 = nn.functional.pad(x1, [diffX // 2, diffX - diffX // 2, diffY // 2, diffY - diffY // 2])
+        
+        # Concatenate upsampled features with skip connection along channel dimension
         x = torch.cat([x2, x1], dim=1)
+        # Process concatenated features through double convolution
         return self.conv(x)
 
 
 class OutConv(nn.Module):
-    """Final output convolution"""
+    """
+    Output Convolution Layer for U-Net.
+
+    This is the final layer of U-Net that produces the segmentation logits.
+    It uses a 1x1 convolution to map the feature maps to the number of classes
+    without changing spatial dimensions.
+
+    Args:
+        in_channels (int): Number of input channels from final decoder block
+        out_channels (int): Number of output classes (e.g., 1 for binary segmentation)
+
+    Attributes:
+        conv (nn.Conv2d): 1x1 convolution layer for final prediction
+    """
     def __init__(self, in_channels, out_channels):
-        super().__init__()
+        super().__init__()  # Initialize the parent nn.Module class
+        # 1x1 convolution to produce class logits, no spatial change
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
 
     def forward(self, x):
+        # Apply 1x1 convolution to get final logits
         return self.conv(x)
 
 
 class UNet(nn.Module):
-    """The full U-Net model architecture."""
+    """
+    U-Net Architecture for Semantic Segmentation.
+
+    U-Net is a convolutional neural network designed for biomedical image segmentation
+    that consists of a contracting encoder path and an expansive decoder path.
+    The encoder captures context through successive downsampling, while the decoder
+    enables precise localization through upsampling and skip connections.
+
+    Architecture:
+    - Encoder: 4 downsampling blocks (64 -> 128 -> 256 -> 512 -> 1024 channels)
+    - Bottleneck: Additional downsampling to 1024 channels
+    - Decoder: 4 upsampling blocks with skip connections (1024 -> 512 -> 256 -> 128 -> 64 channels)
+    - Output: 1x1 convolution for final segmentation logits
+
+    Args:
+        n_channels (int): Number of input channels (e.g., 3 for RGB images)
+        n_classes (int): Number of output classes (e.g., 1 for binary segmentation)
+
+    Attributes:
+        inc (DoubleConv): Initial convolution block
+        down1-down4 (Down): Encoder downsampling blocks
+        up1-up4 (Up): Decoder upsampling blocks with skip connections
+        outc (OutConv): Final output convolution
+    """
     def __init__(self, n_channels, n_classes):
-        super(UNet, self).__init__()
-        self.inc = DoubleConv(n_channels, 64)
-        self.down1 = Down(64, 128)
-        self.down2 = Down(128, 256)
-        self.down3 = Down(256, 512)
-        self.down4 = Down(512, 1024)
-        self.up1 = Up(1024, 512)
-        self.up2 = Up(512, 256)
-        self.up3 = Up(256, 128)
-        self.up4 = Up(128, 64)
+        super(UNet, self).__init__()  # Initialize the parent nn.Module class
+        # Encoder path: progressive downsampling and feature extraction
+        self.inc = DoubleConv(n_channels, 64)  # Initial 64-channel features
+        self.down1 = Down(64, 128)    # Downsample to 128 channels
+        self.down2 = Down(128, 256)   # Downsample to 256 channels
+        self.down3 = Down(256, 512)   # Downsample to 512 channels
+        self.down4 = Down(512, 1024)  # Downsample to 1024 channels (bottleneck)
+        
+        # Decoder path: progressive upsampling with skip connections
+        self.up1 = Up(1024, 512)  # Upsample with skip from down3
+        self.up2 = Up(512, 256)   # Upsample with skip from down2
+        self.up3 = Up(256, 128)   # Upsample with skip from down1
+        self.up4 = Up(128, 64)    # Upsample with skip from inc
+        
+        # Final output layer: map to class logits
         self.outc = OutConv(64, n_classes)
 
     def forward(self, x):
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
+        # Encoder: capture context through downsampling
+        x1 = self.inc(x)      # Initial features: [B, 64, H, W]
+        x2 = self.down1(x1)   # Level 1: [B, 128, H/2, W/2]
+        x3 = self.down2(x2)   # Level 2: [B, 256, H/4, W/4]
+        x4 = self.down3(x3)   # Level 3: [B, 512, H/8, W/8]
+        x5 = self.down4(x4)   # Bottleneck: [B, 1024, H/16, W/16]
         
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
+        # Decoder: recover spatial resolution with skip connections
+        x = self.up1(x5, x4)  # Level 3 up: [B, 512, H/8, W/8] + skip from x4
+        x = self.up2(x, x3)   # Level 2 up: [B, 256, H/4, W/4] + skip from x3
+        x = self.up3(x, x2)   # Level 1 up: [B, 128, H/2, W/2] + skip from x2
+        x = self.up4(x, x1)   # Final up: [B, 64, H, W] + skip from x1
         
-        logits = self.outc(x)
+        # Output: generate segmentation logits
+        logits = self.outc(x)  # [B, n_classes, H, W]
         return logits
+
+# ------------------ Custom Loss for Class Imbalance ------------------
+class BalancedBCEWithLogitsLoss(nn.Module):
+    """
+    Balanced Binary Cross Entropy Loss with Logits.
+
+    This custom loss function addresses class imbalance in segmentation tasks by
+    computing BCE loss separately for positive and negative pixels, then averaging
+    them equally. This prevents the majority class from dominating the loss.
+
+    Traditional BCE would weight loss by class frequency, but this implementation
+    gives equal importance to positive and negative classes regardless of their
+    proportions in the image.
+
+    The loss is computed as:
+    loss = (mean_positive_loss + mean_negative_loss) / 2
+
+    This is particularly useful for wildfire segmentation where burned areas
+    (positive class) are typically much smaller than unburned areas.
+
+    Args:
+        None (no parameters required for initialization)
+
+    Returns:
+        torch.Tensor: Balanced BCE loss value
+    """
+    def __init__(self):
+        super(BalancedBCEWithLogitsLoss, self).__init__()  # Initialize parent nn.Module
+
+    def forward(self, logits, targets):
+        # Flatten predictions and targets to 1D tensors for pixel-wise loss computation
+        logits = logits.view(-1)    # Shape: [N*H*W] where N is batch size
+        targets = targets.view(-1)  # Shape: [N*H*W]
+        
+        # Compute BCE loss for each pixel without reduction (keep per-pixel losses)
+        bce_loss = nn.functional.binary_cross_entropy_with_logits(
+            logits, targets, reduction='none'
+        )  # Shape: [N*H*W]
+        
+        # Create masks for positive (burned) and negative (unburned) pixels
+        pos_mask = (targets == 1)  # Boolean mask for pixels belonging to positive class
+        neg_mask = (targets == 0)  # Boolean mask for pixels belonging to negative class
+        
+        # Extract losses for each class separately
+        pos_loss = bce_loss[pos_mask]  # Losses only for positive pixels
+        neg_loss = bce_loss[neg_mask]  # Losses only for negative pixels
+        
+        # Handle edge cases where one class might be absent in the batch
+        if pos_loss.numel() == 0:  # No positive pixels in this batch
+            return neg_loss.mean()  # Return only negative class loss
+        if neg_loss.numel() == 0:  # No negative pixels in this batch
+            return pos_loss.mean()  # Return only positive class loss
+        
+        # Average the mean losses of both classes equally
+        return (pos_loss.mean() + neg_loss.mean()) / 2
 
 # ------------------ Segmentation Metrics ------------------
 def calculate_iou(pred, target, smooth=1e-6):
     """
-    Calculate Intersection over Union (IoU) for binary segmentation.
-    
+    Calculate Intersection over Union (IoU) for Binary Segmentation.
+
+    IoU measures the overlap between predicted and ground truth segmentation masks.
+    It is calculated as the ratio of intersection area to union area.
+
+    Formula: IoU = (Intersection + smooth) / (Union + smooth)
+
     Args:
-        pred: Predicted binary mask (numpy array)
-        target: Ground truth binary mask (numpy array)
-        smooth: Small value to avoid division by zero
-    
+        pred (numpy.ndarray): Predicted binary mask (0s and 1s)
+        target (numpy.ndarray): Ground truth binary mask (0s and 1s)
+        smooth (float, optional): Small value added to avoid division by zero.
+                                 Defaults to 1e-6.
+
     Returns:
-        IoU score (float)
+        float: IoU score between 0 and 1, where 1 indicates perfect overlap
+
+    Notes:
+        - Both pred and target are converted to boolean arrays
+        - The smooth parameter prevents division by zero when both masks are empty
+        - Higher IoU values indicate better segmentation performance
     """
+    # Convert arrays to boolean type for logical operations
     pred = pred.astype(bool)
     target = target.astype(bool)
     
+    # Calculate intersection: pixels where both pred and target are True
     intersection = np.logical_and(pred, target).sum()
+    # Calculate union: pixels where either pred or target (or both) are True
     union = np.logical_or(pred, target).sum()
     
+    # Compute IoU with smoothing to handle edge cases
     iou = (intersection + smooth) / (union + smooth)
     return iou
 
 def calculate_dice_coefficient(pred, target, smooth=1e-6):
     """
-    Calculate Dice coefficient for binary segmentation.
-    
+    Calculate Dice Coefficient (F1 Score) for Binary Segmentation.
+
+    The Dice coefficient measures the similarity between two sets and is commonly
+    used in segmentation tasks. It gives equal weight to precision and recall.
+
+    Formula: Dice = (2 * Intersection + smooth) / (Pred_Sum + Target_Sum + smooth)
+
     Args:
-        pred: Predicted binary mask (numpy array)
-        target: Ground truth binary mask (numpy array)
-        smooth: Small value to avoid division by zero
-    
+        pred (numpy.ndarray): Predicted binary mask (0s and 1s)
+        target (numpy.ndarray): Ground truth binary mask (0s and 1s)
+        smooth (float, optional): Small value added to avoid division by zero.
+                                 Defaults to 1e-6.
+
     Returns:
-        Dice coefficient (float)
+        float: Dice coefficient between 0 and 1, where 1 indicates perfect overlap
+
+    Notes:
+        - Also known as F1-score for binary segmentation
+        - More sensitive to small objects than IoU
+        - Commonly used in medical image segmentation evaluation
     """
+    # Convert arrays to boolean type for consistent processing
     pred = pred.astype(bool)
     target = target.astype(bool)
     
+    # Calculate intersection: pixels where both masks are True
     intersection = np.logical_and(pred, target).sum()
+    
+    # Compute Dice coefficient with smoothing
     dice = (2.0 * intersection + smooth) / (pred.sum() + target.sum() + smooth)
     return dice
 
 def calculate_pixel_accuracy(pred, target):
     """
-    Calculate pixel accuracy for binary segmentation.
-    
+    Calculate Pixel-wise Accuracy for Binary Segmentation.
+
+    Pixel accuracy measures the percentage of correctly classified pixels
+    in the segmentation mask. It is a simple but potentially misleading metric
+    for imbalanced datasets.
+
+    Formula: Accuracy = (Correct_Pixels) / (Total_Pixels)
+
     Args:
-        pred: Predicted binary mask (numpy array)
-        target: Ground truth binary mask (numpy array)
-    
+        pred (numpy.ndarray): Predicted binary mask (0s and 1s)
+        target (numpy.ndarray): Ground truth binary mask (0s and 1s)
+
     Returns:
-        Pixel accuracy (float)
+        float: Pixel accuracy between 0 and 1
+
+    Notes:
+        - Simple to compute but can be misleading with class imbalance
+        - For wildfire segmentation, this might be high due to many unburned pixels
+        - Should be used alongside other metrics like IoU and Dice
     """
+    # Convert arrays to boolean for element-wise comparison
     pred = pred.astype(bool)
     target = target.astype(bool)
     
+    # Count correctly classified pixels (where pred == target)
     correct_pixels = np.sum(pred == target)
+    # Total number of pixels in the image
     total_pixels = pred.size
     
+    # Calculate accuracy as ratio of correct to total pixels
     accuracy = correct_pixels / total_pixels
     return accuracy
 
 def compute_accuracy(outputs, masks, threshold=0.5):
     """
-    Compute pixel-wise accuracy for segmentation.
+    Compute Pixel-wise Accuracy for Segmentation Model Outputs.
+
+    This function calculates accuracy directly from raw model logits by:
+    1. Applying sigmoid to convert logits to probabilities
+    2. Thresholding probabilities to get binary predictions
+    3. Comparing predictions with ground truth masks
+
+    Args:
+        outputs (torch.Tensor): Raw model outputs/logits [B, C, H, W]
+        masks (torch.Tensor): Ground truth binary masks [B, C, H, W]
+        threshold (float, optional): Probability threshold for binarization.
+                                   Defaults to 0.5.
+
+    Returns:
+        torch.Tensor: Pixel accuracy as a scalar tensor
+
+    Notes:
+        - Uses torch operations for GPU compatibility
+        - Automatically flattens tensors for pixel-wise comparison
+        - Returns tensor for gradient flow in training loops
     """
-    with torch.no_grad():
-        preds = torch.sigmoid(outputs) >= threshold
-        correct = (preds == masks.bool()).float().sum()
-        total = masks.numel()
-        return correct / total
+    with torch.no_grad():  # Disable gradient computation for evaluation
+        # Convert logits to probabilities using sigmoid
+        preds = torch.sigmoid(outputs) >= threshold  # Binary predictions
+        # Compare predictions with ground truth (boolean tensors)
+        correct = (preds == masks.bool()).float().sum()  # Count correct pixels
+        total = masks.numel()  # Total number of elements
+        return correct / total  # Return accuracy ratio
 
 def calculate_mae(pred, target):
     """
-    Calculate Mean Absolute Error (MAE) for segmentation.
-    
+    Calculate Mean Absolute Error (MAE) for Segmentation.
+
+    MAE measures the average absolute difference between predicted and target values.
+    For segmentation, this can be used with probability maps or binary masks.
+
+    Formula: MAE = mean(|pred - target|)
+
     Args:
-        pred: Predicted mask (numpy array, can be probabilities or binary)
-        target: Ground truth binary mask (numpy array)
-    
+        pred (numpy.ndarray): Predicted values (probabilities or binary)
+        target (numpy.ndarray): Ground truth values (binary masks)
+
     Returns:
-        MAE (float)
+        float: Mean absolute error value
+
+    Notes:
+        - If pred is boolean, it's converted to float (0.0 or 1.0)
+        - Target is always converted to float for consistency
+        - Lower MAE indicates better performance
+        - Useful for evaluating probability map quality
     """
-    # Convert predictions to probabilities if they're binary
+    # Ensure predictions are in float format
     if pred.dtype == bool:
-        pred = pred.astype(float)
+        pred = pred.astype(float)  # Convert binary to 0.0/1.0
     else:
-        pred = pred.astype(float)
+        pred = pred.astype(float)  # Ensure float type
     
+    # Convert target to float for computation
     target = target.astype(float)
     
+    # Calculate mean absolute difference
     mae = np.mean(np.abs(pred - target))
     return mae
 
 def evaluate_segmentation_metrics(model, dataloader, device):
     """
-    Evaluate segmentation model using IoU, Dice, Pixel Accuracy, and MAE.
-    
+    Evaluate Segmentation Model Performance Across Multiple Metrics.
+
+    This function comprehensively evaluates a trained segmentation model by computing
+    multiple metrics on a validation/test dataset. It processes the entire dataloader
+    and aggregates results across all samples.
+
+    Computed Metrics:
+    - IoU (Intersection over Union): Measures overlap quality
+    - Dice Coefficient: F1-score for segmentation, sensitive to small objects
+    - Pixel Accuracy: Simple accuracy, can be misleading with imbalance
+    - MAE (Mean Absolute Error): Average difference between predictions and targets
+
     Args:
-        model: Trained PyTorch model
-        dataloader: DataLoader for evaluation
-        device: Device to run inference on
-    
+        model (nn.Module): Trained PyTorch segmentation model
+        dataloader (DataLoader): DataLoader containing evaluation images and masks
+        device (torch.device): Device to run inference on (CPU/GPU)
+
     Returns:
-        Dictionary containing all metrics
+        tuple: (metrics_dict, all_preds_flat, all_masks_flat)
+            - metrics_dict: Dictionary with mean and std for each metric
+            - all_preds_flat: Concatenated flattened predictions for classification report
+            - all_masks_flat: Concatenated flattened ground truth for classification report
+
+    Notes:
+        - Model is set to eval mode during evaluation
+        - Uses sigmoid activation and 0.5 threshold for binary classification
+        - Computes per-sample metrics then aggregates across dataset
+        - Returns flattened arrays for generating sklearn classification reports
     """
+    # Set model to evaluation mode (disables dropout, batch norm updates, etc.)
     model.eval()
     
+    # Initialize lists to store per-sample metrics
     ious = []
     dice_scores = []
     pixel_accuracies = []
     maes = []
     
+    # Lists to store flattened predictions and masks for classification metrics
     all_preds_flat = []
     all_masks_flat = []
     
+    # Disable gradient computation for efficiency
     with torch.no_grad():
+        # Iterate through all batches in the dataloader
         for images, masks in tqdm(dataloader, desc="Evaluating segmentation metrics"):
+            # Move batch to specified device (GPU/CPU)
             images = images.to(device)
             masks = masks.to(device).float()
             
-            # Get predictions
+            # Forward pass: get model predictions
             outputs = model(images)
+            # Convert logits to probabilities
             pred_probs = torch.sigmoid(outputs)
+            # Convert to binary predictions using 0.5 threshold
             pred_binary = (pred_probs > 0.5).float()
             
-            # Convert to numpy for metric calculation
+            # Convert tensors to numpy arrays for metric computation
             pred_binary_np = pred_binary.cpu().numpy()
             pred_probs_np = pred_probs.cpu().numpy()
             masks_np = masks.cpu().numpy()
             
-            # Flatten predictions and masks for classification report and confusion matrix
+            # Flatten predictions and masks for classification report generation
             all_preds_flat.append(pred_binary_np.flatten())
             all_masks_flat.append(masks_np.flatten())
             
-            # Calculate metrics for each sample in the batch
+            # Calculate metrics for each sample in the current batch
             for i in range(pred_binary_np.shape[0]):
-                pred_bin = pred_binary_np[i, 0]  # Remove channel dimension
-                pred_prob = pred_probs_np[i, 0]  # Remove channel dimension
-                mask = masks_np[i, 0]  # Remove channel dimension
+                # Extract single sample (remove batch dimension)
+                pred_bin = pred_binary_np[i, 0]  # Shape: [H, W]
+                pred_prob = pred_probs_np[i, 0]  # Shape: [H, W]
+                mask = masks_np[i, 0]            # Shape: [H, W]
                 
-                # Calculate metrics
+                # Compute individual metrics for this sample
                 iou = calculate_iou(pred_bin, mask)
                 dice = calculate_dice_coefficient(pred_bin, mask)
                 pixel_acc = calculate_pixel_accuracy(pred_bin, mask)
                 mae = calculate_mae(pred_prob, mask)
                 
+                # Store metrics for later aggregation
                 ious.append(iou)
                 dice_scores.append(dice)
                 pixel_accuracies.append(pixel_acc)
                 maes.append(mae)
     
-    # Concatenate all flattened predictions and masks
+    # Concatenate all flattened predictions and masks across batches
     all_preds_flat = np.concatenate(all_preds_flat)
     all_masks_flat = np.concatenate(all_masks_flat).astype(int)
-
-    # Calculate mean metrics
+    
+    # Calculate aggregate metrics: mean and standard deviation
     metrics = {
         'IoU': np.mean(ious),
         'Dice_Coefficient': np.mean(dice_scores),
@@ -311,19 +593,37 @@ def evaluate_segmentation_metrics(model, dataloader, device):
 
 def print_segmentation_metrics(metrics, mode="pixels"):
     """
-    Print segmentation metrics in a formatted way.
-    
+    Print Segmentation Metrics in a Formatted, Human-Readable Format.
+
+    This function displays segmentation evaluation results in a clear, organized manner.
+    It shows both individual metrics with their standard deviations and a summary table.
+
     Args:
-        metrics: Dictionary containing segmentation metrics
-        mode: Evaluation mode ("pixels" or "tiles")
+        metrics (dict): Dictionary containing metric names as keys and values as values.
+                       Expected keys: IoU, Dice_Coefficient, Pixel_Accuracy, MAE
+                       and their corresponding _std versions.
+        mode (str, optional): Evaluation context description (e.g., "pixels", "tiles").
+                             Defaults to "pixels".
+
+    Returns:
+        None: Prints formatted output to console
+
+    Notes:
+        - Displays metrics with 4 decimal precision
+        - Shows mean ± standard deviation format
+        - Creates a pandas DataFrame for tabular display
+        - Useful for both console output and logging
     """
+    # Print header with evaluation mode
     print(f"\n=== Segmentation Metrics ({mode}) ===")
+    
+    # Print each metric with mean and standard deviation
     print(f"IoU (Intersection over Union): {metrics['IoU']:.4f} ± {metrics['IoU_std']:.4f}")
     print(f"Dice Coefficient: {metrics['Dice_Coefficient']:.4f} ± {metrics['Dice_std']:.4f}")
     print(f"Pixel Accuracy: {metrics['Pixel_Accuracy']:.4f} ± {metrics['Pixel_Accuracy_std']:.4f}")
     print(f"Mean Absolute Error (MAE): {metrics['MAE']:.4f} ± {metrics['MAE_std']:.4f}")
     
-    # Create a summary DataFrame
+    # Create a summary DataFrame for tabular display
     summary_data = {
         'Metric': ['IoU', 'Dice Coefficient', 'Pixel Accuracy', 'MAE'],
         'Mean': [metrics['IoU'], metrics['Dice_Coefficient'], 
@@ -337,21 +637,51 @@ def print_segmentation_metrics(metrics, mode="pixels"):
 
 def save_classification_report(y_true, y_pred, save_dir='Model_Evaluation', mode='validation'):
     """
-    Generates, prints, and saves a classification report and confusion matrix.
+    Generate, Display, and Save Classification Report and Confusion Matrix.
+
+    This function creates a comprehensive classification evaluation including:
+    1. Text-based classification report with precision, recall, F1-score
+    2. Confusion matrix visualization
+    3. Automatic saving of both to timestamped files
+
+    Args:
+        y_true (array-like): Ground truth labels (flattened predictions/masks)
+        y_pred (array-like): Predicted labels (flattened predictions)
+        save_dir (str, optional): Directory to save outputs. Defaults to 'Model_Evaluation'.
+        mode (str, optional): Evaluation context (e.g., 'validation', 'test').
+                             Defaults to 'validation'.
+
+    Returns:
+        None: Saves files and displays plots
+
+    Notes:
+        - Creates directory if it doesn't exist
+        - Saves classification report as CSV file
+        - Saves confusion matrix as high-resolution PNG
+        - Uses timestamp in filenames to avoid overwrites
+        - Class names are hardcoded for wildfire segmentation (Unburned/Burned)
     """
-    # --- Classification Report ---
+    # Ensure save directory exists
+    os.makedirs(save_dir, exist_ok=True)
+    
+    # Generate timestamp for unique filenames
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    
+    # --- Generate and Save Classification Report ---
     report = classification_report(y_true, y_pred, target_names=['Unburned (0)', 'Burned (1)'])
     print(f"\n=== Classification Report ({mode}) ===")
     print(report)
-
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    
+    # Save report as CSV file
     report_path = os.path.join(save_dir, f'classification_report_{mode}_{ts}.csv')
     with open(report_path, 'w') as f:
         f.write(report)
     print(f"✅ Classification report saved to {report_path}")
-
-    # --- Confusion Matrix ---
+    
+    # --- Generate and Save Confusion Matrix ---
     cm = confusion_matrix(y_true, y_pred)
+    
+    # Create confusion matrix plot
     plt.figure(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
                 xticklabels=['Unburned', 'Burned'], 
@@ -360,6 +690,7 @@ def save_classification_report(y_true, y_pred, save_dir='Model_Evaluation', mode
     plt.xlabel('Predicted Label')
     plt.ylabel('True Label')
     
+    # Save confusion matrix plot
     cm_path = os.path.join(save_dir, f'confusion_matrix_{mode}_{ts}.png')
     plt.savefig(cm_path, dpi=300)
     print(f"✅ Confusion matrix plot saved to {cm_path}")
@@ -367,35 +698,65 @@ def save_classification_report(y_true, y_pred, save_dir='Model_Evaluation', mode
 
 def plot_metrics(train_losses, val_losses, train_accuracies, val_accuracies, save_dir='Model_Evaluation'):
     """
-    Plots and saves the training/validation loss and accuracy curves.
-    """
-    epochs = range(1, len(train_losses) + 1)
-    plt.figure(figsize=(14, 6))
+    Plot and Save Training History Curves.
 
-    # Plot Loss
+    This function creates a comprehensive visualization of the training process by plotting
+    both loss and accuracy curves for training and validation sets side by side.
+
+    Args:
+        train_losses (list): Training loss values for each epoch
+        val_losses (list): Validation loss values for each epoch
+        train_accuracies (list): Training accuracy values for each epoch
+        val_accuracies (list): Validation accuracy values for each epoch
+        save_dir (str, optional): Directory to save the plot. Defaults to 'Model_Evaluation'.
+
+    Returns:
+        None: Saves plot to file and displays it
+
+    Notes:
+        - Creates a 2-subplot figure (loss and accuracy)
+        - Uses blue for training metrics, red for validation
+        - Includes grid lines for better readability
+        - Saves high-resolution PNG with timestamp
+        - Automatically creates save directory if needed
+    """
+    # Generate epoch numbers based on training history length
+    epochs = range(1, len(train_losses) + 1)
+    
+    # Create figure with two subplots side by side
+    plt.figure(figsize=(14, 6))
+    
+    # Left subplot: Training and validation loss
     plt.subplot(1, 2, 1)
-    plt.plot(epochs, train_losses, 'bo-', label='Training Loss')
-    plt.plot(epochs, val_losses, 'ro-', label='Validation Loss')
+    plt.plot(epochs, train_losses, 'bo-', label='Training Loss')      # Blue circles with lines
+    plt.plot(epochs, val_losses, 'ro-', label='Validation Loss')      # Red circles with lines
     plt.title('Training and Validation Loss')
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
     plt.legend()
     plt.grid(True)
-
-    # Plot Accuracy
+    
+    # Right subplot: Training and validation accuracy
     plt.subplot(1, 2, 2)
-    plt.plot(epochs, train_accuracies, 'bo-', label='Training Accuracy')
-    plt.plot(epochs, val_accuracies, 'ro-', label='Validation Accuracy')
+    plt.plot(epochs, train_accuracies, 'bo-', label='Training Accuracy')  # Blue circles with lines
+    plt.plot(epochs, val_accuracies, 'ro-', label='Validation Accuracy')  # Red circles with lines
     plt.title('Training and Validation Accuracy')
     plt.xlabel('Epochs')
     plt.ylabel('Accuracy')
     plt.legend()
     plt.grid(True)
-
+    
+    # Adjust layout to prevent overlap
     plt.tight_layout()
+    
+    # Ensure save directory exists
     os.makedirs(save_dir, exist_ok=True)
+    
+    # Generate timestamp for unique filename
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     save_path = os.path.join(save_dir, f'training_metrics_{ts}.png')
+    
+    # Save plot with high resolution
     plt.savefig(save_path, dpi=300)
     print(f"✅ Training metrics plot saved to {save_path}")
     plt.show()
@@ -623,7 +984,7 @@ def main():
         return
 
     # --- Prepare data ---
-    tile_size = 256  # Extract 256x256 patches
+    tile_size = 512  # Extract 512x512 patches (downsampled spatially to 256x256)
     all_burn_tiles, all_unburn_tiles = [], []
     all_image_paths, all_label_paths, all_bands = [], [], []
     max_channels = 0  # Track max number of bands among rasters
@@ -672,21 +1033,21 @@ def main():
         all_label_paths.append(label_path)
         all_bands.append(bands)
 
-    # --- Balance dataset ---
-    rng = np.random.RandomState(42)
-    n_keep = min(len(all_burn_tiles), len(all_unburn_tiles))
-    burn_indices = rng.choice(len(all_burn_tiles), size=n_keep, replace=False)
-    unburn_indices = rng.choice(len(all_unburn_tiles), size=n_keep, replace=False)
+    # Use all data instead of downsampling classes at the tile level.
+    # Spatial downsampling (pixel-level) is handled by resizing larger tiles (512x512) 
+    # down to the model's input size (256x256) in the SegmentationDataset.
+    print(f"\nProcessing all tiles with spatial downsampling...")
+    if not all_burn_tiles:
+        print("❌ Error: No burned tiles found. Check your shapefiles and spatial overlap logic.")
+        return
 
-    burn_tiles = [all_burn_tiles[i] for i in burn_indices]
-    unburn_tiles = [all_unburn_tiles[i] for i in unburn_indices]
-
-    balanced_tiles = burn_tiles + unburn_tiles
-    tile_labels = [1] * len(burn_tiles) + [0] * len(unburn_tiles)
+    all_tiles = all_burn_tiles + all_unburn_tiles
+    tile_labels = [1] * len(all_burn_tiles) + [0] * len(all_unburn_tiles)
+    print(f" -> Total dataset size (no tiles discarded): {len(all_tiles)} tiles")
 
     # Split into train/validation sets (stratified)
     train_windows, val_windows, _, _ = train_test_split(
-        balanced_tiles, tile_labels, test_size=0.2, random_state=42, stratify=tile_labels
+        all_tiles, tile_labels, test_size=0.2, random_state=42, stratify=tile_labels
     )
 
     # Ensure all rasters use same number of bands
@@ -700,21 +1061,14 @@ def main():
     train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)
     val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=0)
 
-    # --- Loss weighting ---
-    print("Computing pixel class weights...")
-    burn_pixels, unburn_pixels = 0, 0
-    for _, masks in train_dataloader:
-        burn_pixels += masks.sum().item()                      # Count positive pixels
-        unburn_pixels += masks.numel() - masks.sum().item()    # Count negative pixels
-    pos_weight = torch.tensor([unburn_pixels / (burn_pixels + 1e-6)], device=device)
-
     # --- Model, Loss, Optimizer ---
     model = UNet(n_channels=max_channels, n_classes=1).to(device)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # Weighted binary cross-entropy
+    # Use Balanced BCE to handle class imbalance (pixel-level equal contribution)
+    criterion = BalancedBCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
     # --- Training Loop ---
-    num_epochs = 20
+    num_epochs = 10
     train_losses, val_losses = [], []
     train_accuracies, val_accuracies = [], []
 
@@ -777,10 +1131,12 @@ def main():
     # Generate and save classification report and confusion matrix
     save_classification_report(y_true, y_pred, mode='validation')
     
-    # Save metrics to file
+    # Save metrics to file in the specific evaluation directory
+    eval_save_dir = 'Model_Evaluation'
+    os.makedirs(eval_save_dir, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     metrics_df = pd.DataFrame([pixel_metrics])
-    metrics_file = f"segmentation_metrics_{ts}.csv"
+    metrics_file = os.path.join(eval_save_dir, f"segmentation_metrics_{ts}.csv")
     metrics_df.to_csv(metrics_file, index=False)
     print(f"\nMetrics saved to: {metrics_file}")
 
