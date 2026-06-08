@@ -1,1 +1,0 @@
-This directory store Sentinel-2 Imagery for use to classified.
