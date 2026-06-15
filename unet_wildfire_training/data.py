@@ -171,6 +171,9 @@ class SegmentationDataset(Dataset):
         normalization_percentiles: Tuple[float, float] = (2.0, 98.0),
         band_layout: Optional[Dict[str, int]] = None,
         reflectance_scale: float = 10000.0,
+        gdfs: Optional[Sequence[gpd.GeoDataFrame]] = None,
+        packed_masks: Optional[Sequence[np.ndarray]] = None,
+        image_widths: Optional[Sequence[int]] = None,
     ):
         if bands is None:
             raise ValueError("`bands` is required so the channel count is known")
@@ -192,16 +195,24 @@ class SegmentationDataset(Dataset):
 
         self.crs_list = []
         self.gdf_list = []
-        for image_path, label_path in zip(self.image_paths, self.label_paths):
-            with rasterio.open(image_path) as src:
-                crs = src.crs
-            self.crs_list.append(crs)
+        self.packed_masks = None
+        self.image_widths = None
 
-            gdf = gpd.read_file(label_path)
-            if gdf.crs != crs:
-                gdf = gdf.to_crs(crs)
-            gdf.geometry = gdf.geometry.buffer(0)
-            self.gdf_list.append(gdf)
+        if packed_masks is not None and image_widths is not None:
+            self.packed_masks = list(packed_masks)
+            self.image_widths = list(image_widths)
+        elif gdfs is not None:
+            self.gdf_list = list(gdfs)
+        else:
+            for image_path, label_path in zip(self.image_paths, self.label_paths):
+                with rasterio.open(image_path) as src:
+                    crs = src.crs
+                self.crs_list.append(crs)
+
+                gdf = gpd.read_file(label_path)
+                if gdf.crs != crs:
+                    gdf = gdf.to_crs(crs)
+                self.gdf_list.append(gdf)
 
     def __len__(self) -> int:
         return len(self.windows)
@@ -230,7 +241,6 @@ class SegmentationDataset(Dataset):
     def _read_tile(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         img_idx, window = self.windows[idx]
         image_path = self.image_paths[img_idx]
-        gdf = self.gdf_list[img_idx]
 
         with rasterio.open(image_path) as src:
             image = src.read(self.bands[img_idx], window=window)
@@ -240,16 +250,29 @@ class SegmentationDataset(Dataset):
         height = window.height
         width = window.width
 
-        clipped = gdf.clip(bounds)
-        shapes = [(mapping(geom), 1) for geom in clipped.geometry if not geom.is_empty]
-        mask = rasterize(
-            shapes,
-            out_shape=(height, width),
-            transform=tile_transform,
-            fill=0,
-            all_touched=True,
-            dtype=np.uint8,
-        )
+        if self.packed_masks is not None and self.image_widths is not None:
+            packed_mask = self.packed_masks[img_idx]
+            r_start = int(window.row_off)
+            r_end = r_start + height
+            c_start = int(window.col_off)
+            c_end = c_start + width
+            
+            packed_rows = packed_mask[r_start:r_end, :]
+            unpacked_rows = np.unpackbits(packed_rows, axis=-1)[:, :self.image_widths[img_idx]]
+            mask = unpacked_rows[:, c_start:c_end]
+        else:
+            gdf = self.gdf_list[img_idx]
+            clipped = gdf.clip(bounds)
+            clipped_geom = clipped.geometry.buffer(0)
+            shapes = [(mapping(geom), 1) for geom in clipped_geom if not geom.is_empty]
+            mask = rasterize(
+                shapes,
+                out_shape=(height, width),
+                transform=tile_transform,
+                fill=0,
+                all_touched=True,
+                dtype=np.uint8,
+            )
 
         if self.band_layout is not None:
             indices = compute_sentinel2_indices(
@@ -299,7 +322,6 @@ def match_raster_shapefile(
                 if gdf.empty:
                     gdf_cache[path] = None
                 else:
-                    gdf.geometry = gdf.geometry.buffer(0)
                     gdf_cache[path] = gdf
             except Exception as exc:
                 print(f"Warning: Could not load shapefile {path}: {exc}", flush=True)
@@ -357,6 +379,7 @@ def collect_tile_windows(
     List[Tuple[int, Window]],
     List[int],
     int,
+    List[gpd.GeoDataFrame],
 ]:
     """Enumerate non-overlapping tile windows for every matched raster.
 
@@ -369,19 +392,25 @@ def collect_tile_windows(
         negative using the shapefile's spatial index.
 
     Returns:
-        image_paths, label_paths, bands_per_image, windows, tile_labels, max_channels
+        image_paths, label_paths, bands_per_image, windows, tile_labels, max_channels, gdfs_per_image
 
         - ``windows[i]`` is ``(image_index, Window)``.
         - ``tile_labels[i]`` is 1 for burned tiles and 0 for unburned.
         - ``bands_per_image[i]`` is padded later so all rasters expose the same
           channel count.
+        - ``gdfs_per_image[i]`` is the loaded and reprojected GeoDataFrame for image i.
     """
     image_paths: List[str] = []
     label_paths: List[str] = []
+    gdfs_per_image: List[gpd.GeoDataFrame] = []
     bands_per_image: List[List[int]] = []
     burn_windows: List[Tuple[int, Window]] = []
     unburn_windows: List[Tuple[int, Window]] = []
     max_channels = 0
+
+    # Cache for loaded and reprojected GeoDataFrames
+    # Key: (label_path, img_crs)
+    gdf_cache: Dict[Tuple[str, str], gpd.GeoDataFrame] = {}
 
     for image_path, label_path in pairs:
         with rasterio.open(image_path) as src:
@@ -390,10 +419,16 @@ def collect_tile_windows(
             img_transform = src.transform
             img_crs = src.crs
 
-        gdf = gpd.read_file(label_path)
-        if gdf.crs != img_crs:
-            gdf = gdf.to_crs(img_crs)
-        gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notnull()]
+        cache_key = (str(label_path), str(img_crs))
+        if cache_key in gdf_cache:
+            gdf = gdf_cache[cache_key]
+        else:
+            gdf = gpd.read_file(label_path)
+            if gdf.crs != img_crs:
+                gdf = gdf.to_crs(img_crs)
+            gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notnull()]
+            gdf_cache[cache_key] = gdf
+
         if gdf.empty:
             continue
 
@@ -416,12 +451,13 @@ def collect_tile_windows(
 
         image_paths.append(image_path)
         label_paths.append(label_path)
+        gdfs_per_image.append(gdf)
         bands_per_image.append(band_indices)
         max_channels = max(max_channels, len(band_indices))
 
     all_windows = burn_windows + unburn_windows
     tile_labels = [1] * len(burn_windows) + [0] * len(unburn_windows)
-    return image_paths, label_paths, bands_per_image, all_windows, tile_labels, max_channels
+    return image_paths, label_paths, bands_per_image, all_windows, tile_labels, max_channels, gdfs_per_image
 
 
 def _pad_bands(bands_per_image: Sequence[Sequence[int]], max_channels: int) -> List[List[int]]:
@@ -451,7 +487,7 @@ def build_dataloaders(
     Returns ``(train_loader, val_loader, model_input_channels)``. Raises
     ``RuntimeError`` when no burned tiles are found (training would be degenerate).
     """
-    image_paths, label_paths, bands_per_image, windows, tile_labels, max_channels = collect_tile_windows(
+    image_paths, label_paths, bands_per_image, windows, tile_labels, max_channels, gdfs_per_image = collect_tile_windows(
         pairs, config.tile_size
     )
 
@@ -474,6 +510,34 @@ def build_dataloaders(
 
     padded_bands = _pad_bands(bands_per_image, max_channels)
 
+    print(" -> Pre-rasterizing shapefiles to image grids...", flush=True)
+    packed_masks = []
+    image_widths = []
+    for idx, (image_path, label_path) in enumerate(zip(image_paths, label_paths)):
+        gdf = gdfs_per_image[idx]
+        with rasterio.open(image_path) as src:
+            out_shape = src.shape
+            transform = src.transform
+            width = src.width
+        image_widths.append(width)
+
+        valid_geoms = gdf.geometry.buffer(0)
+        shapes = [(mapping(geom), 1) for geom in valid_geoms if not geom.is_empty]
+        if shapes:
+            mask = rasterize(
+                shapes,
+                out_shape=out_shape,
+                transform=transform,
+                fill=0,
+                all_touched=True,
+                dtype=np.uint8,
+            )
+        else:
+            mask = np.zeros(out_shape, dtype=np.uint8)
+        packed_mask = np.packbits(mask, axis=-1)
+        packed_masks.append(packed_mask)
+    print(" -> Pre-rasterization completed successfully.", flush=True)
+
     train_dataset = SegmentationDataset(
         image_paths,
         label_paths,
@@ -483,6 +547,8 @@ def build_dataloaders(
         normalization_percentiles=config.normalization_percentiles,
         band_layout=band_layout,
         reflectance_scale=reflectance_scale,
+        packed_masks=packed_masks,
+        image_widths=image_widths,
     )
     val_dataset = SegmentationDataset(
         image_paths,
@@ -493,6 +559,8 @@ def build_dataloaders(
         normalization_percentiles=config.normalization_percentiles,
         band_layout=band_layout,
         reflectance_scale=reflectance_scale,
+        packed_masks=packed_masks,
+        image_widths=image_widths,
     )
 
     train_loader = DataLoader(

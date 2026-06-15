@@ -431,23 +431,26 @@ def main():
     max_channels = 0  # Initialize maximum number of channels
 
     for img_idx, image_path in enumerate(image_paths):  # Iterate over image paths
+        print(f"[{img_idx + 1}/{len(image_paths)}] Scanning {os.path.basename(image_path)}...", flush=True)
         with rasterio.open(image_path) as src:  # Open raster file
             height, width = src.shape  # Get image dimensions
             num_bands = src.count - 1  # Get number of bands (excluding mask)
             max_channels = max(max_channels, num_bands)  # Update maximum channels
 
-            windows = [Window(j, i, tile_size, tile_size)  # Create windows for tiling
-                       for i in range(0, height, tile_size)  # Iterate over height
-                       for j in range(0, width, tile_size)  # Iterate over width
-                       if i + tile_size <= height and j + tile_size <= width]  # Ensure window fits
+            # Read the entire mask band (last band) in one read operation
+            mask_band = src.read(src.count)
+            if mask_band.ndim == 3:
+                mask_band = mask_band[0]
 
-            for w in windows:  # Iterate over windows
-                tile_data = src.read(window=w)  # Read tile data
-                mask = tile_data[-1]  # Get mask (last band)
-                if mask.mean() > 0.1:  # Check if tile is burn (mean mask value > 0.1)
-                    all_burn_tiles.append((img_idx, w))  # Add to burn tiles
-                else:
-                    all_unburn_tiles.append((img_idx, w))  # Add to unburn tiles
+            for i in range(0, height, tile_size):
+                for j in range(0, width, tile_size):
+                    if i + tile_size <= height and j + tile_size <= width:
+                        w = Window(j, i, tile_size, tile_size)
+                        mask_tile = mask_band[i:i+tile_size, j:j+tile_size]
+                        if mask_tile.mean() > 0.1:  # Check if tile is burn (mean mask value > 0.1)
+                            all_burn_tiles.append((img_idx, w))  # Add to burn tiles
+                        else:
+                            all_unburn_tiles.append((img_idx, w))  # Add to unburn tiles
 
     # Use all tiles and pixels (no tile-level downsampling)
     # Class balancing is handled at the pixel level via loss weighting.
