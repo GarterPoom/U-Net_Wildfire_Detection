@@ -41,11 +41,14 @@ def percentile_normalize(image: np.ndarray, low: float, high: float) -> np.ndarr
     out = image.astype(np.float32, copy=True)
     for c in range(out.shape[0]):
         band = out[c]
-        lo, hi = np.percentile(band, [low, high])
-        if hi - lo > 1e-6:
+        # Ignore NaNs (cloud-masked pixels) when computing statistics
+        lo, hi = np.nanpercentile(band, [low, high])
+        if not np.isnan(lo) and not np.isnan(hi) and hi - lo > 1e-6:
             out[c] = np.clip((band - lo) / (hi - lo), 0.0, 1.0)
         else:
             out[c] = 0.0
+    # Convert any remaining NaNs to zero for model input
+    out = np.nan_to_num(out, nan=0.0)
     return out
 
 

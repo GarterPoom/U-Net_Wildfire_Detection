@@ -58,6 +58,8 @@ def predict_on_new_image(
         height, width = src.shape
         meta = src.meta.copy()
         image = src.read().astype(np.float32)
+        # Identify cloud-masked areas to preserve them in the output
+        nan_mask = np.isnan(image).any(axis=0)
 
     if band_layout is not None:
         indices = compute_sentinel2_indices(image, band_layout, reflectance_scale)
@@ -103,26 +105,31 @@ def predict_on_new_image(
                 tile_tensor = torch.from_numpy(tile_resized).unsqueeze(0).to(device)
                 logits = model(tile_tensor)
                 prob = torch.sigmoid(logits).cpu().numpy().squeeze()
-
+                
                 prob_full = resize(
                     prob, (tile_size, tile_size),
                     mode="reflect", anti_aliasing=True,
                 ).astype(np.float32)
+                # Ensure probability stays strictly in [0, 1] after resampling
+                prob_full = np.clip(prob_full, 0, 1)
 
                 prob_full = prob_full[:actual_h, :actual_w]
                 pred_sum[i:row_end, j:col_end] += prob_full
                 pred_count[i:row_end, j:col_end] += 1
 
     avg_pred = pred_sum / np.maximum(pred_count, 1)
+    # Mask out cloud areas in the probability map
+    avg_pred[nan_mask] = np.nan
 
     prob_meta = meta.copy()
-    prob_meta.update(count=1, dtype="float32", nodata=None, compress="lzw")
+    prob_meta.update(count=1, dtype="float32", nodata=np.nan, compress="lzw")
     os.makedirs(os.path.dirname(prob_output_path) or ".", exist_ok=True)
     with rasterio.open(prob_output_path, "w", **prob_meta) as dst:
         dst.write(avg_pred.astype(np.float32), 1)
     print(f"✅ Probability map saved to {prob_output_path}")
 
-    full_mask = (avg_pred > 0.5).astype(np.uint8)
+    # Create binary mask: set cloud-masked areas to nodata (255)
+    full_mask = np.where(nan_mask, 255, (avg_pred > 0.5).astype(np.uint8)).astype(np.uint8)
     meta.update(count=1, dtype="uint8", nodata=255, compress="lzw")
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with rasterio.open(output_path, "w", **meta) as dst:

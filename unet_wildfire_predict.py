@@ -129,7 +129,7 @@ def _build_parser() -> argparse.ArgumentParser:
                         help='JSON band layout, e.g. \'{"B03":2,"B04":3,"B06":5,"B07":6,"B08":7,"B8A":8,"B12":10}\'')
     parser.add_argument("--reflectance_scale", type=float, default=defaults.reflectance_scale,
                         help="Reflectance divisor for index computation (1.0 if already [0,1])")
-    parser.add_argument("--threshold", type=_threshold_arg, default=defaults.threshold,
+    parser.add_argument("--threshold", type=_threshold_arg, default=0.5,
                         help="Probability cutoff for the binary burn mask (must be in [0.1, 0.9])")
     parser.add_argument("--visualize", action="store_true", help="Visualize the predicted mask")
     parser.add_argument("--recursive", action="store_true", default=True,
