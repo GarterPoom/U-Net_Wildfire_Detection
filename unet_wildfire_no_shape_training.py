@@ -1,5 +1,12 @@
 # Core Python utilities
-import os  # Importing os for file and directory operations
+import os  # For file and directory operations
+import sys # For system-specific parameters and functions
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
+
+# Set PROJ_LIB to ensure the correct PROJ database is used from the Conda environment
+proj_path = os.path.join(sys.prefix, 'Library', 'share', 'proj')
+if os.path.exists(proj_path):
+    os.environ['PROJ_LIB'] = proj_path
 
 import glob  # Importing glob for file pattern matching
 
@@ -126,6 +133,36 @@ class UNet(nn.Module):
         x = self.up4(x, x1)  # Fourth upsampling with skip connection
         logits = self.outc(x)  # Apply output convolution to get logits
         return logits  # Return final output
+
+class BalancedBCEWithLogitsLoss(nn.Module):
+    """
+    Balanced Binary Cross Entropy Loss.
+    Computes the loss for positive and negative pixels separately and averages them.
+    This ensures that the majority class and minority class contribute equally 
+    to the training, effectively performing pixel-level downsampling of the 
+    majority class's influence.
+    """
+    def __init__(self):
+        super(BalancedBCEWithLogitsLoss, self).__init__()
+
+    def forward(self, logits, targets):
+        logits = logits.view(-1)
+        targets = targets.view(-1)
+        
+        bce_loss = nn.functional.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+        
+        pos_mask = (targets == 1)
+        neg_mask = (targets == 0)
+        
+        pos_loss = bce_loss[pos_mask]
+        neg_loss = bce_loss[neg_mask]
+        
+        if pos_loss.numel() == 0:
+            return neg_loss.mean()
+        if neg_loss.numel() == 0:
+            return pos_loss.mean()
+            
+        return (pos_loss.mean() + neg_loss.mean()) / 2
 
 # ------------------ Dataset ------------------
 class SegmentationDataset(Dataset):
@@ -394,39 +431,36 @@ def main():
     max_channels = 0  # Initialize maximum number of channels
 
     for img_idx, image_path in enumerate(image_paths):  # Iterate over image paths
+        print(f"[{img_idx + 1}/{len(image_paths)}] Scanning {os.path.basename(image_path)}...", flush=True)
         with rasterio.open(image_path) as src:  # Open raster file
             height, width = src.shape  # Get image dimensions
             num_bands = src.count - 1  # Get number of bands (excluding mask)
             max_channels = max(max_channels, num_bands)  # Update maximum channels
 
-            windows = [Window(j, i, tile_size, tile_size)  # Create windows for tiling
-                       for i in range(0, height, tile_size)  # Iterate over height
-                       for j in range(0, width, tile_size)  # Iterate over width
-                       if i + tile_size <= height and j + tile_size <= width]  # Ensure window fits
+            # Read the entire mask band (last band) in one read operation
+            mask_band = src.read(src.count)
+            if mask_band.ndim == 3:
+                mask_band = mask_band[0]
 
-            for w in windows:  # Iterate over windows
-                tile_data = src.read(window=w)  # Read tile data
-                mask = tile_data[-1]  # Get mask (last band)
-                if mask.mean() > 0.1:  # Check if tile is burn (mean mask value > 0.1)
-                    all_burn_tiles.append((img_idx, w))  # Add to burn tiles
-                else:
-                    all_unburn_tiles.append((img_idx, w))  # Add to unburn tiles
+            for i in range(0, height, tile_size):
+                for j in range(0, width, tile_size):
+                    if i + tile_size <= height and j + tile_size <= width:
+                        w = Window(j, i, tile_size, tile_size)
+                        mask_tile = mask_band[i:i+tile_size, j:j+tile_size]
+                        if mask_tile.mean() > 0.1:  # Check if tile is burn (mean mask value > 0.1)
+                            all_burn_tiles.append((img_idx, w))  # Add to burn tiles
+                        else:
+                            all_unburn_tiles.append((img_idx, w))  # Add to unburn tiles
 
-    # Balance dataset
-    rng = np.random.RandomState(42)  # Initialize random number generator
-    n_keep = min(len(all_burn_tiles), len(all_unburn_tiles))  # Get minimum class size
-    burn_indices = rng.choice(len(all_burn_tiles), size=n_keep, replace=False)  # Randomly select burn tiles
-    unburn_indices = rng.choice(len(all_unburn_tiles), size=n_keep, replace=False)  # Randomly select unburn tiles
-
-    burn_tiles = [all_burn_tiles[i] for i in burn_indices]  # Subset burn tiles
-    unburn_tiles = [all_unburn_tiles[i] for i in unburn_indices]  # Subset unburn tiles
-
-    balanced_tiles = burn_tiles + unburn_tiles  # Combine balanced tiles
-    tile_labels = [1] * len(burn_tiles) + [0] * len(unburn_tiles)  # Create labels (1 for burn, 0 for unburn)
+    # Use all tiles and pixels (no tile-level downsampling)
+    # Class balancing is handled at the pixel level via loss weighting.
+    all_tiles = all_burn_tiles + all_unburn_tiles
+    tile_labels = [1] * len(all_burn_tiles) + [0] * len(all_unburn_tiles)
+    print(f" -> Total dataset size (all pixels included): {len(all_tiles)} tiles")
 
     # Split into train/validation sets
     train_windows, val_windows, _, _ = train_test_split(  # Split data
-        balanced_tiles, tile_labels, test_size=0.2, random_state=42, stratify=tile_labels  # 80-20 split, stratified
+        all_tiles, tile_labels, test_size=0.2, random_state=42, stratify=tile_labels  # 80-20 split, stratified
     )
 
     # Build datasets
@@ -434,20 +468,13 @@ def main():
     val_dataset = SegmentationDataset(image_paths, val_windows, num_bands=max_channels)  # Create validation dataset
 
     # DataLoaders
-    train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=4)  # Create training DataLoader
-    val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)  # Create validation DataLoader
-
-    # Loss weighting
-    print("Computing pixel class weights...")  # Print status
-    burn_pixels, unburn_pixels = 0, 0  # Initialize pixel counts
-    for _, masks in train_dataloader:  # Iterate over training data
-        burn_pixels += masks.sum().item()  # Count burn pixels
-        unburn_pixels += masks.numel() - masks.sum().item()  # Count unburn pixels
-    pos_weight = torch.tensor([unburn_pixels / (burn_pixels + 1e-6)], device=device)  # Compute positive weight for loss
+    train_dataloader = DataLoader(train_dataset, batch_size=4, shuffle=True, num_workers=0)  # Create training DataLoader
+    val_dataloader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=0)  # Create validation DataLoader
 
     # Model, Loss, Optimizer
     model = UNet(n_channels=max_channels, n_classes=1).to(device)  # Initialize U-Net model and move to device
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)  # Define binary cross-entropy loss with class weighting
+    # Use Balanced BCE to handle class imbalance (pixel-level equal contribution)
+    criterion = BalancedBCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=1e-4)  # Initialize Adam optimizer with learning rate
 
     # Training Loop with Accuracy

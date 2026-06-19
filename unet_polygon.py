@@ -1,4 +1,11 @@
 import os
+import sys
+
+# Set PROJ_LIB to ensure the correct PROJ database is used from the Conda environment
+proj_path = os.path.join(sys.prefix, 'Library', 'share', 'proj')
+if os.path.exists(proj_path):
+    os.environ['PROJ_LIB'] = proj_path
+
 import re
 import shutil  # To move files to the new folder
 from rasterio.features import shapes
