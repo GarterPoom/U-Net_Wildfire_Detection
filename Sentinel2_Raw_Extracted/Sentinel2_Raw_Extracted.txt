@@ -1,0 +1,1 @@
+This directory store Sentinel-2 Prodect success extracted.
