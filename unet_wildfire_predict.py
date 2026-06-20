@@ -152,7 +152,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use_indices", action="store_true", help="Compute spectral indices")
     parser.add_argument("--band_layout", type=str, default=None, help="JSON band layout")
     parser.add_argument("--reflectance_scale", type=float, default=defaults.reflectance_scale, help="Scale factor")
-    parser.add_argument("--threshold", type=_threshold_arg, default=0.5, help="Binary threshold [0.1, 0.9]")
+    parser.add_argument("--threshold", type=_threshold_arg, default=0.7, help="Binary threshold [0.1, 0.9]")
     parser.add_argument("--visualize", action="store_true", help="Show plot")
     parser.add_argument("--recursive", action="store_true", default=True, help="Search subdirs")
     parser.add_argument("--preserve_structure", action="store_true", help="Mirror directory structure")
