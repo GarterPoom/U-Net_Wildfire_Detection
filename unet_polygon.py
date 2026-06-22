@@ -13,7 +13,6 @@ import geopandas as gpd
 from shapely.geometry import shape
 import rasterio as rio
 import numpy as np
-from IPython.display import display
 import pandas as pd
 from typing import Optional
 
@@ -192,7 +191,7 @@ def create_polygon_shapefile_from_burnt_areas(tif_file_path, output_folder, admi
     print(f"Polygon shapefile '{output_shapefile_path}' has been created.")
 
     # Display Final GeoDataframe
-    display(final_gdf)
+    print(final_gdf)
     
     return final_gdf
 
