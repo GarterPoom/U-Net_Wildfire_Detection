@@ -16,6 +16,58 @@ from unet_wildfire_predict.visualization import visualize_prediction
 from unet_wildfire_training import UNet
 from unet_wildfire_training.data import compute_sentinel2_indices, percentile_normalize
 
+from pathlib import Path
+from unet_wildfire_predict.config import PredictionConfig
+from unet_wildfire_predict.paths import get_tiff_files 
+
+def run_prediction(config: PredictionConfig) -> None:
+    """
+    Wrapper function that iterates through all GeoTIFFs in the input directory
+    provided by the config and runs inference on each.
+    """
+    image_dir = Path(config.image_path)
+    
+    # Find all TIFF files in the input directory
+    input_files = get_tiff_files(image_dir, recursive=True)
+    
+    if not input_files:
+        print(f"⚠️ No input images found in {image_dir}")
+        return
+
+    print(f"Found {len(input_files)} images. Starting batch inference...")
+
+    for img_path_str in input_files:
+        img_path = Path(img_path_str)
+        
+        # 1. Determine the output paths
+        # We follow the naming convention: 
+        # Probability: [filename]_probability.tif
+        # Mask: [filename]_predicted_mask.tif
+        rel_path = img_path.relative_to(image_dir.parent if config.preserve_structure else image_dir)
+        
+        prob_output = Path(config.prob_output_dir) / rel_path.with_name(f"{img_path.stem}_probability.tif")
+        mask_output = Path(config.output_dir) / rel_path.with_name(f"{img_path.stem}_predicted_mask.tif")
+
+        # 2. Ensure destination directories exist
+        prob_output.parent.mkdir(parents=True, exist_ok=True)
+        mask_output.parent.mkdir(parents=True, exist_ok=True)
+
+        print(f"Processing: {img_path.name}")
+        
+        # 3. Call the single-image inference function
+        try:
+            predict_on_new_image(
+                model_path=str(config.model_path),
+                new_image_path=str(img_path),
+                output_path=str(mask_output),
+                prob_output_path=str(prob_output),
+                config=config,
+                device=None # Will default to CUDA/CPU inside the function
+            )
+        except Exception as e:
+            print(f"❌ Error processing {img_path.name}: {e}")
+
+    print("✅ Batch inference complete.")
 
 def _resize_chw(array: np.ndarray, out_hw: Tuple[int, int], anti_aliasing: bool = True) -> np.ndarray:
     """Resize a ``(C, H, W)`` array to ``(C, out_h, out_w)`` using skimage."""
@@ -26,7 +78,6 @@ def _resize_chw(array: np.ndarray, out_hw: Tuple[int, int], anti_aliasing: bool 
         mode="reflect",
         anti_aliasing=anti_aliasing,
     ).transpose(2, 0, 1).astype(np.float32)
-
 
 def predict_on_new_image(
     model_path: str,
