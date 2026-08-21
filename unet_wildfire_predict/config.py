@@ -1,34 +1,38 @@
-"""Prediction configuration for the U-Net wildfire pipeline."""
+"""Prediction configuration for the U‑Net wildfire pipeline.
+
+The :class:`PredictionConfig` dataclass centralises all hyperparameters and I/O paths required
+to run inference.  It mirrors the training‑side configuration (tiling, normalisation) so that
+the same preprocessing steps are applied to both phases.
+"""
 
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+# Import the training‑time configuration to enable easy adaptation.
 from unet_wildfire_training import TrainingConfig
 
 
 @dataclass
 class PredictionConfig:
-    """Hyperparameters and I/O paths for running U-Net inference.
+    """Hyperparameters and I/O paths for running U‑Net inference.
 
     Attributes:
-        model_path: Path to the trained ``.pth`` state-dict.
-        image_path: GeoTIFF file or directory of GeoTIFFs to predict on.
-        output_dir: Destination directory for binary mask rasters.
-        prob_output_dir: Destination directory for probability rasters.
-        tile_size: Raster-window tile edge in pixels (must match training).
-        target_size: Network-input tile size in pixels (must match training).
-        overlap: Pixel overlap between adjacent raster tiles during stitching.
-        normalization_percentiles: ``(low, high)`` percentile clip applied per
-            band before min-max scaling. Matches the training pipeline.
-        band_layout: Optional 0-indexed channel positions for Sentinel-2 bands.
-            When provided, NDVI/NDWI/SAVI/BAIS2 are appended to the input stack.
-        reflectance_scale: Divisor applied to raw bands before index computation
-            (10000 for Sentinel-2 L2A uint16, 1.0 if already in ``[0, 1]``).
-        recursive: Whether to search subdirectories of ``image_path``.
-        preserve_structure: Whether to mirror the input directory structure in
-            the output directories.
-        visualize: Display a matplotlib figure of each prediction.
+        model_path: Path to the trained ``.pth`` state‑dict file.
+        image_path: Directory or single GeoTIFF file containing input rasters.
+        output_dir: Destination folder for binary mask rasters (e.g., predicted burn areas).
+        prob_output_dir: Destination folder for probability map rasters.
+        tile_size: Size of the sliding window used during inference (must match training).
+        target_size: Spatial dimensions (height, width) that the network expects as input.
+        overlap: Number of pixels shared between adjacent tiles; helps seamless stitching.
+        normalization_percentiles: Tuple ``(low, high)`` indicating percentile clip before min‑max scaling.
+        band_layout: Optional dictionary mapping Sentinel‑2 band names to 0‑indexed channel positions.
+            When provided, indices (NDVI, NDWI, SAVI, BAIS2) are appended to the input stack.
+        reflectance_scale: Divisor applied to raw band values before index computation
+            (10000 for Sentinel‑2 L2A uint16; 1.0 if bands are already in ``[0, 1]``).
+        recursive: If True, search sub‑directories of ``image_path`` for GeoTIFFs.
+        preserve_structure: When True, replicate the input directory hierarchy inside the output folders.
+        visualize: Show a Matplotlib figure for each processed raster (useful for debugging).
     """
 
     model_path: Path = Path("Export_Model") / "unet_wildfire.pth"
@@ -51,7 +55,15 @@ class PredictionConfig:
 
     @classmethod
     def from_training(cls, training: TrainingConfig) -> "PredictionConfig":
-        """Build a prediction config whose tiling/normalization match training."""
+        """Create a :class:`PredictionConfig` whose tiling and normalisation match a training config.
+
+        Args:
+            training: Configuration used during model training.
+
+        Returns:
+            A new ``PredictionConfig`` instance with matching ``tile_size``,
+            ``target_size``, and ``normalization_percentiles``.
+        """
         return cls(
             model_path=training.model_path(),
             tile_size=training.tile_size,
@@ -60,7 +72,7 @@ class PredictionConfig:
         )
 
     def to_training_config(self) -> TrainingConfig:
-        """Adapter for reusing the training-side data helpers during inference."""
+        """Adapt this config for reuse of training‑side data helpers (e.g., dataloaders)."""
         cfg = TrainingConfig()
         cfg.tile_size = self.tile_size
         cfg.target_size = self.target_size
