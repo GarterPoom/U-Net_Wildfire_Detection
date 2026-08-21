@@ -46,33 +46,61 @@ The system consists of five main modules:
    - Administrative boundary intersection
    - Multi-country attribute assignment
 
-## 🚀 Quick Start
+## 🧰 Before You Begin: System Requirements
 
-### Prerequisites
+Set these up **before** you clone the repo or run any script — several of the Python packages here (GDAL, rasterio, geopandas, PyTorch) depend on system-level libraries or drivers that pip alone won't fully resolve.
 
+| Software | Why it's needed | Get it |
+|---|---|---|
+| **Git** | To clone this repository | [git-scm.com/downloads](https://git-scm.com/downloads) |
+| **Python 3.10+** (project was built/tested on 3.13) | Runs every script in the pipeline | [python.org](https://www.python.org/downloads/) or via Conda below |
+| **Miniconda / Anaconda** *(strongly recommended)* | Makes installing GDAL and its compiled dependencies far more reliable than pip alone | [docs.conda.io/miniconda](https://docs.conda.io/en/latest/miniconda.html) |
+| **GDAL (system library)** | `rasterio`, `geopandas`, and direct `from osgeo import gdal` calls in `classified_preprocessing.py` all need the compiled GDAL library, not just a Python wrapper | Easiest via `conda install -c conda-forge gdal`; otherwise `apt-get install gdal-bin libgdal-dev` (Ubuntu) or `brew install gdal` (macOS) |
+| **NVIDIA GPU driver + CUDA** *(optional, recommended for training)* | Training/inference use PyTorch with CUDA (`torch==2.11.0+cu128` in the provided environment) for a major speed-up | Install the latest [NVIDIA driver](https://www.nvidia.com/Download/index.aspx) supporting CUDA 12.8. No GPU? The code auto-falls-back to CPU, just slower. |
+| **C++ Build Tools** *(Windows only, if pip-installing rather than using conda)* | Some geospatial packages compile native extensions on install | "Desktop development with C++" workload from [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) |
+| **QGIS** *(optional)* | Not required to run the pipeline, but the scripts print QGIS styling hints and it's the easiest way to inspect output GeoTIFF masks/probability maps | [qgis.org/download](https://qgis.org/download/) |
+
+**Quick check before cloning:**
 ```bash
-# Core dependencies
-pip install torch torchvision
-pip install rasterio geopandas
-pip install scikit-image scikit-learn
-pip install matplotlib seaborn pandas
-pip install tqdm psutil
-
-# GDAL (geospatial processing)
-# On Windows: conda install gdal
-# On Ubuntu: sudo apt-get install gdal-bin
-# On macOS: brew install gdal
+git --version
+python --version      # 3.10+
+conda --version        # if using the conda route
+nvidia-smi              # only relevant if you plan to use GPU acceleration
 ```
+
+## 🚀 Quick Start
 
 ### Installation
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/your-username/gistda-wildfire-unet.git
-   cd gistda-wildfire-unet
+   git clone https://github.com/GarterPoom/U-Net_Wildfire_Detection.git
+   cd U-Net_Wildfire_Detection
    ```
 
-2. **Prepare your data structure**
+2. **Create the environment**
+
+   **Option A — Conda (recommended, especially on Windows/NVIDIA):** the repo ships a ready-made environment file.
+   ```bash
+   conda env create -f unet_fire_environment.yml
+   conda activate unet_fire
+   ```
+   > Note: `unet_fire_environment.yml` was exported from a Windows + CUDA 12.8 setup. On macOS/Linux or CPU-only machines, use Option B instead.
+
+   **Option B — Manual (pip / venv), e.g. macOS, Linux, or CPU-only:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate        # Windows: venv\Scripts\activate
+
+   # Install system GDAL first (see table above), then:
+   pip install torch torchvision   # add --index-url https://download.pytorch.org/whl/cu128 for a matching GPU build
+   pip install rasterio geopandas shapely
+   pip install scikit-image scikit-learn
+   pip install matplotlib seaborn pandas
+   pip install tqdm psutil GDAL=="$(gdal-config --version)"
+   ```
+
+3. **Prepare your data structure**
    ```
    project/
    ├── Classified_Image/          # Input Sentinel-2 JP2 files
@@ -81,7 +109,7 @@ pip install tqdm psutil
    └── CLMVTH_Administrative_Boundary/  # Country boundaries
    ```
 
-3. **Run the complete workflow**
+4. **Run the complete workflow**
    ```bash
    python detection_module.py
    ```
